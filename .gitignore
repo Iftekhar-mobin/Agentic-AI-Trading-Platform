@@ -19,6 +19,9 @@ dist/
 .coverage
 htmlcov/
 
+# Local runtime data (paper portfolio, caches)
+data/
+
 # IDE
 .idea/
 .vscode/

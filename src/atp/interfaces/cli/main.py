@@ -7,6 +7,8 @@ Commands:
     atp analyze AAPL -i 1d         -- run the analysis workflow (supervisor graph)
     atp backtest AAPL -s ema_cross -- backtest a strategy preset (or -f file.json)
     atp optimize AAPL -s ema_cross -- optimize strategy parameters (add --walk-forward)
+    atp portfolio                  -- show the paper portfolio with live prices
+    atp risk-check AAPL --stop 300 -- size a trade and run it through the risk gate
     atp serve                      -- start the HTTP API
 """
 
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import structlog
@@ -27,6 +30,7 @@ from atp.domain.models.backtest import BacktestResult
 from atp.domain.models.market import BarInterval
 from atp.domain.models.optimization import OptimizationResult, WalkForwardResult
 from atp.domain.models.strategy import StrategyDefinition
+from atp.domain.models.trading import OrderSide, Portfolio, RiskDecision
 from atp.domain.strategy_presets import PRESET_SPACES, PRESETS
 from atp.infrastructure.config import Settings, get_settings
 from atp.infrastructure.observability import configure_logging
@@ -76,6 +80,15 @@ def _build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--seed", type=int, default=42)
     optimize.add_argument("--years", type=float, default=5.0, help="history to fetch")
 
+    subparsers.add_parser("portfolio", help="show the paper portfolio")
+
+    risk_check = subparsers.add_parser("risk-check", help="run a trade through the risk gate")
+    risk_check.add_argument("symbol")
+    risk_check.add_argument("--side", choices=["buy", "sell"], default="buy")
+    risk_check.add_argument("--qty", type=Decimal, default=None)
+    risk_check.add_argument("--stop", type=Decimal, default=None, help="stop-loss price")
+    risk_check.add_argument("--take", type=Decimal, default=None, help="take-profit price")
+
     serve = subparsers.add_parser("serve", help="start the HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -123,6 +136,24 @@ def _status(settings: Settings) -> None:
 async def _run(args: argparse.Namespace, settings: Settings) -> None:
     container = Container.build(settings)
     try:
+        if args.command == "portfolio":
+            portfolio = await container.get_portfolio.execute()
+            _print_portfolio(portfolio)
+            return
+
+        if args.command == "risk-check":
+            decision = await container.check_trade_risk.execute(
+                args.symbol,
+                side=OrderSide(args.side),
+                quantity=args.qty,
+                stop_loss=args.stop,
+                take_profit=args.take,
+            )
+            _print_risk_decision(decision)
+            if not decision.approved:
+                raise SystemExit(1)
+            return
+
         interval = BarInterval(args.interval)
 
         if args.command == "analyze":
@@ -201,6 +232,49 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
             log.info("bars.total", symbol=history.symbol, count=len(history))
     finally:
         await container.aclose()
+
+
+def _print_portfolio(portfolio: Portfolio) -> None:
+    log.info(
+        "portfolio.summary",
+        cash=float(portfolio.cash),
+        equity=float(portfolio.equity),
+        exposure_pct=round(float(portfolio.exposure_pct), 2),
+        drawdown_pct=round(float(portfolio.drawdown_pct), 2),
+        positions=len(portfolio.positions),
+        realized_pnl_today=float(portfolio.realized_pnl_today),
+    )
+    for position in portfolio.positions:
+        log.info(
+            "position",
+            symbol=position.symbol,
+            quantity=float(position.quantity),
+            avg_entry=float(position.avg_entry_price),
+            price=float(position.current_price),
+            market_value=float(position.market_value),
+            unrealized_pnl=round(float(position.unrealized_pnl), 2),
+            unrealized_pnl_pct=round(float(position.unrealized_pnl_pct), 2),
+        )
+
+
+def _print_risk_decision(decision: RiskDecision) -> None:
+    proposal = decision.proposal
+    log.info(
+        "risk.proposal",
+        symbol=proposal.symbol,
+        side=proposal.side.value,
+        quantity=float(proposal.quantity),
+        entry_price=float(proposal.entry_price),
+        stop_loss=float(proposal.stop_loss) if proposal.stop_loss else None,
+        notional=round(float(proposal.notional), 2),
+    )
+    log.info("risk.metrics", **{k: round(v, 4) for k, v in decision.metrics.items()})
+    if decision.approved:
+        log.info("risk.verdict", verdict="APPROVED")
+    else:
+        log.error("risk.verdict", verdict="REJECTED")
+        for violation in decision.violations:
+            log.error("risk.violation", rule=violation.rule, detail=violation.detail)
 
 
 def _print_optimization(result: OptimizationResult) -> None:

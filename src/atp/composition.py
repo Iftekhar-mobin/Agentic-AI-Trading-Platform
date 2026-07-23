@@ -15,6 +15,8 @@ from atp.application.agents import TechnicalAnalysisAgent
 from atp.application.orchestration import TradingOrchestrator
 from atp.application.use_cases import (
     AnalyzeTicker,
+    CheckTradeRisk,
+    GetPortfolio,
     GetPriceHistory,
     LoadPriceHistory,
     OptimizeStrategy,
@@ -27,6 +29,7 @@ from atp.domain.ports import (
     IndicatorEngine,
     LLMClient,
     MarketDataProvider,
+    PortfolioRepository,
     StrategyOptimizer,
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
@@ -36,6 +39,7 @@ from atp.infrastructure.llm import AnthropicLLMClient
 from atp.infrastructure.market_data import YFinanceMarketDataProvider
 from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
+from atp.infrastructure.persistence.json_portfolio import JsonPortfolioRepository
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,9 @@ class Container:
     analyze_ticker: AnalyzeTicker
     run_backtest: RunBacktest
     optimize_strategy: OptimizeStrategy
+    portfolio_repository: PortfolioRepository
+    get_portfolio: GetPortfolio
+    check_trade_risk: CheckTradeRisk
     orchestrator: TradingOrchestrator
 
     @classmethod
@@ -70,6 +77,11 @@ class Container:
         analyze_ticker = AnalyzeTicker(load_price_history, technical_analysis_agent)
         backtest_engine = BacktestingPyEngine()
         strategy_optimizer = OptunaStrategyOptimizer(backtest_engine)
+        portfolio_repository = JsonPortfolioRepository(
+            settings.data_dir / "portfolio.json",
+            starting_cash=settings.paper_starting_cash,
+        )
+        get_portfolio = GetPortfolio(portfolio_repository, market_data)
         return cls(
             settings=settings,
             engine=engine,
@@ -86,6 +98,9 @@ class Container:
             analyze_ticker=analyze_ticker,
             run_backtest=RunBacktest(load_price_history, backtest_engine),
             optimize_strategy=OptimizeStrategy(load_price_history, strategy_optimizer),
+            portfolio_repository=portfolio_repository,
+            get_portfolio=get_portfolio,
+            check_trade_risk=CheckTradeRisk(get_portfolio, market_data, settings.risk),
             orchestrator=TradingOrchestrator(analyze_ticker),
         )
 

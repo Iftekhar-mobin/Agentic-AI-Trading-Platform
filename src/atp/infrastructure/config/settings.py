@@ -7,11 +7,15 @@ in one place.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from atp.domain.models.trading import RiskLimits
 
 
 class Environment(StrEnum):
@@ -82,6 +86,12 @@ class Settings(BaseSettings):
         description="Force JSON log output. Defaults to JSON outside development.",
     )
     trading_mode: TradingMode = TradingMode.PAPER
+    data_dir: Path = Path("data")
+    paper_starting_cash: Decimal = Field(default=Decimal("100000"), gt=0)
+
+    # Hard risk limits (env: ATP_RISK__*). Enforced by the deterministic
+    # risk engine; nothing downstream can loosen them at runtime.
+    risk: RiskLimits = Field(default_factory=RiskLimits)
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
