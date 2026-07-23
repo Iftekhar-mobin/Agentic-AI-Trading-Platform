@@ -22,6 +22,7 @@ uv run atp status          # smoke command: prints configuration wiring
 uv run atp sync AAPL       # pull daily bars into TimescaleDB
 uv run atp bars AAPL -n 5  # show the 5 most recent stored bars
 uv run atp analyze AAPL    # run the analysis workflow (needs an Anthropic key)
+uv run atp backtest AAPL -s ema_cross   # backtest a strategy preset
 uv run atp serve           # start the HTTP API on http://127.0.0.1:8000
 uv run pytest              # run the test suite
 ```

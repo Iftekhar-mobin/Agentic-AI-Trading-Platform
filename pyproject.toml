@@ -16,6 +16,7 @@ dependencies = [
     "langgraph>=0.2",
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    "backtesting>=0.6.6",
 ]
 
 [project.scripts]
@@ -68,7 +69,7 @@ files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["yfinance", "yfinance.*"]
+module = ["yfinance", "yfinance.*", "backtesting", "backtesting.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

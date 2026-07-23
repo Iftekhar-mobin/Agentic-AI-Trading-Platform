@@ -8,7 +8,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from atp.application.agents import TechnicalAnalysisAgent
-from atp.application.use_cases import AnalyzeTicker
+from atp.application.use_cases import AnalyzeTicker, LoadPriceHistory
 from atp.domain.errors import RepositoryUnavailableError
 from atp.domain.models.analysis import SignalDirection, TechnicalAssessment
 from atp.domain.models.explainability import Evidence
@@ -93,7 +93,8 @@ class StubProvider:
 
 def make_use_case(repository: StubRepository, provider: StubProvider) -> AnalyzeTicker:
     agent = TechnicalAnalysisAgent(FakeLLM(), PandasIndicatorEngine())
-    return AnalyzeTicker(repository, provider, agent, clock=lambda: NOW)
+    loader = LoadPriceHistory(repository, provider, clock=lambda: NOW)
+    return AnalyzeTicker(loader, agent)
 
 
 async def test_uses_stored_bars_when_sufficient() -> None:

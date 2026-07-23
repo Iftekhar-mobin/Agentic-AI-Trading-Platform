@@ -13,8 +13,21 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from atp.application.agents import TechnicalAnalysisAgent
 from atp.application.orchestration import TradingOrchestrator
-from atp.application.use_cases import AnalyzeTicker, GetPriceHistory, SyncMarketData
-from atp.domain.ports import BarRepository, IndicatorEngine, LLMClient, MarketDataProvider
+from atp.application.use_cases import (
+    AnalyzeTicker,
+    GetPriceHistory,
+    LoadPriceHistory,
+    RunBacktest,
+    SyncMarketData,
+)
+from atp.domain.ports import (
+    BacktestEngine,
+    BarRepository,
+    IndicatorEngine,
+    LLMClient,
+    MarketDataProvider,
+)
+from atp.infrastructure.backtesting import BacktestingPyEngine
 from atp.infrastructure.config import Settings, get_settings
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
@@ -31,9 +44,12 @@ class Container:
     indicator_engine: IndicatorEngine
     llm: LLMClient
     technical_analysis_agent: TechnicalAnalysisAgent
+    backtest_engine: BacktestEngine
     sync_market_data: SyncMarketData
     get_price_history: GetPriceHistory
+    load_price_history: LoadPriceHistory
     analyze_ticker: AnalyzeTicker
+    run_backtest: RunBacktest
     orchestrator: TradingOrchestrator
 
     @classmethod
@@ -45,7 +61,9 @@ class Container:
         indicator_engine = PandasIndicatorEngine()
         llm = AnthropicLLMClient(settings.llm)
         technical_analysis_agent = TechnicalAnalysisAgent(llm, indicator_engine)
-        analyze_ticker = AnalyzeTicker(bar_repository, market_data, technical_analysis_agent)
+        load_price_history = LoadPriceHistory(bar_repository, market_data)
+        analyze_ticker = AnalyzeTicker(load_price_history, technical_analysis_agent)
+        backtest_engine = BacktestingPyEngine()
         return cls(
             settings=settings,
             engine=engine,
@@ -54,9 +72,12 @@ class Container:
             indicator_engine=indicator_engine,
             llm=llm,
             technical_analysis_agent=technical_analysis_agent,
+            backtest_engine=backtest_engine,
             sync_market_data=SyncMarketData(market_data, bar_repository),
             get_price_history=GetPriceHistory(bar_repository),
+            load_price_history=load_price_history,
             analyze_ticker=analyze_ticker,
+            run_backtest=RunBacktest(load_price_history, backtest_engine),
             orchestrator=TradingOrchestrator(analyze_ticker),
         )
 
