@@ -17,9 +17,14 @@ explainable.
 ```bash
 uv sync                    # create venv, install Python 3.12 + dependencies
 cp .env.example .env       # local configuration
-uv run atp                 # smoke command: prints startup status
+docker compose up -d       # start TimescaleDB + Redis
+uv run atp status          # smoke command: prints configuration wiring
+uv run atp sync AAPL       # pull daily bars into TimescaleDB
+uv run atp bars AAPL -n 5  # show the 5 most recent stored bars
 uv run pytest              # run the test suite
 ```
+
+Integration tests skip automatically when the database is not running.
 
 ## Development
 

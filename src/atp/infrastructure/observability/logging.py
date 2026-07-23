@@ -32,11 +32,15 @@ def configure_logging(*, level: str = "INFO", json_output: bool = False) -> None
             structlog.processors.JSONRenderer(),
         ]
     else:
-        processors.append(structlog.dev.ConsoleRenderer())
+        # Colors only on a real terminal; plain text when piped or captured.
+        processors.append(structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()))
 
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        logger_factory=structlog.PrintLoggerFactory(sys.stdout),
+        # No stream is bound here: the factory resolves sys.stdout per call, so
+        # stream redirection (e.g. pytest capture) can never leave loggers
+        # holding a closed file.
+        logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,
     )
