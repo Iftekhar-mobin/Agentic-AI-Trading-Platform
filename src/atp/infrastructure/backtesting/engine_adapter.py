@@ -19,9 +19,15 @@ portfolio-level engine can replace it without touching any caller.
 from __future__ import annotations
 
 import math
+import os
 
 import pandas as pd
 import structlog
+
+# backtesting.py renders a tqdm progress bar per run, which floods structured
+# logs during optimization (hundreds of runs). Must be set before import.
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 from backtesting import Backtest, Strategy
 
 from atp.domain.errors import InsufficientHistoryError

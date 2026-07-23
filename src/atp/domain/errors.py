@@ -21,3 +21,7 @@ class RepositoryUnavailableError(DomainError):
 
 class LLMGenerationError(DomainError):
     """The LLM failed to produce a usable structured response."""
+
+
+class OptimizationError(DomainError):
+    """Optimization could not produce a valid result (no viable trials, bad splits)."""

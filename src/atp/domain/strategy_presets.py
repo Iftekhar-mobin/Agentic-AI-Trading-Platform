@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from atp.domain.models.optimization import (
+    OptimizationSpec,
+    ParameterKind,
+    SearchParameter,
+)
 from atp.domain.models.strategy import (
     Comparison,
     Condition,
@@ -88,5 +93,94 @@ PRESETS: Final[dict[str, StrategyDefinition]] = {
             ),
         ),
         take_profit_atr=4.0,
+    ),
+}
+
+# Search spaces for the presets. Note how one parameter binds multiple paths
+# (entry AND exit) so tuned strategies stay coherent, and how the fast/slow
+# EMA ranges are disjoint so fast < slow holds by construction.
+PRESET_SPACES: Final[dict[str, OptimizationSpec]] = {
+    "ema_cross": OptimizationSpec(
+        strategy=PRESETS["ema_cross"],
+        parameters=(
+            SearchParameter(
+                name="fast_period",
+                kind=ParameterKind.INT,
+                low=5,
+                high=40,
+                paths=("entry.0.left.period", "exit.0.left.period"),
+            ),
+            SearchParameter(
+                name="slow_period",
+                kind=ParameterKind.INT,
+                low=45,
+                high=150,
+                paths=("entry.0.right.period", "exit.0.right.period"),
+            ),
+            SearchParameter(
+                name="stop_loss_atr",
+                kind=ParameterKind.FLOAT,
+                low=1.0,
+                high=6.0,
+                step=0.5,
+                paths=("stop_loss_atr",),
+            ),
+        ),
+    ),
+    "rsi_reversion": OptimizationSpec(
+        strategy=PRESETS["rsi_reversion"],
+        parameters=(
+            SearchParameter(
+                name="rsi_period",
+                kind=ParameterKind.INT,
+                low=5,
+                high=30,
+                paths=("entry.0.left.period", "exit.0.left.period"),
+            ),
+            SearchParameter(
+                name="entry_threshold",
+                kind=ParameterKind.FLOAT,
+                low=15.0,
+                high=40.0,
+                step=1.0,
+                paths=("entry.0.right.value",),
+            ),
+            SearchParameter(
+                name="exit_threshold",
+                kind=ParameterKind.FLOAT,
+                low=45.0,
+                high=75.0,
+                step=1.0,
+                paths=("exit.0.right.value",),
+            ),
+            SearchParameter(
+                name="stop_loss_atr",
+                kind=ParameterKind.FLOAT,
+                low=1.0,
+                high=5.0,
+                step=0.5,
+                paths=("stop_loss_atr",),
+            ),
+        ),
+    ),
+    "sma_breakout": OptimizationSpec(
+        strategy=PRESETS["sma_breakout"],
+        parameters=(
+            SearchParameter(
+                name="sma_period",
+                kind=ParameterKind.INT,
+                low=20,
+                high=120,
+                paths=("entry.0.right.period", "exit.0.right.period"),
+            ),
+            SearchParameter(
+                name="take_profit_atr",
+                kind=ParameterKind.FLOAT,
+                low=2.0,
+                high=8.0,
+                step=0.5,
+                paths=("take_profit_atr",),
+            ),
+        ),
     ),
 }

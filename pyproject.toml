@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "backtesting>=0.6.6",
+    "optuna>=4.9.0",
 ]
 
 [project.scripts]

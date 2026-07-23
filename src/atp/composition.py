@@ -17,6 +17,7 @@ from atp.application.use_cases import (
     AnalyzeTicker,
     GetPriceHistory,
     LoadPriceHistory,
+    OptimizeStrategy,
     RunBacktest,
     SyncMarketData,
 )
@@ -26,12 +27,14 @@ from atp.domain.ports import (
     IndicatorEngine,
     LLMClient,
     MarketDataProvider,
+    StrategyOptimizer,
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
 from atp.infrastructure.config import Settings, get_settings
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
 from atp.infrastructure.market_data import YFinanceMarketDataProvider
+from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
 
 
@@ -45,11 +48,13 @@ class Container:
     llm: LLMClient
     technical_analysis_agent: TechnicalAnalysisAgent
     backtest_engine: BacktestEngine
+    strategy_optimizer: StrategyOptimizer
     sync_market_data: SyncMarketData
     get_price_history: GetPriceHistory
     load_price_history: LoadPriceHistory
     analyze_ticker: AnalyzeTicker
     run_backtest: RunBacktest
+    optimize_strategy: OptimizeStrategy
     orchestrator: TradingOrchestrator
 
     @classmethod
@@ -64,6 +69,7 @@ class Container:
         load_price_history = LoadPriceHistory(bar_repository, market_data)
         analyze_ticker = AnalyzeTicker(load_price_history, technical_analysis_agent)
         backtest_engine = BacktestingPyEngine()
+        strategy_optimizer = OptunaStrategyOptimizer(backtest_engine)
         return cls(
             settings=settings,
             engine=engine,
@@ -73,11 +79,13 @@ class Container:
             llm=llm,
             technical_analysis_agent=technical_analysis_agent,
             backtest_engine=backtest_engine,
+            strategy_optimizer=strategy_optimizer,
             sync_market_data=SyncMarketData(market_data, bar_repository),
             get_price_history=GetPriceHistory(bar_repository),
             load_price_history=load_price_history,
             analyze_ticker=analyze_ticker,
             run_backtest=RunBacktest(load_price_history, backtest_engine),
+            optimize_strategy=OptimizeStrategy(load_price_history, strategy_optimizer),
             orchestrator=TradingOrchestrator(analyze_ticker),
         )
 
