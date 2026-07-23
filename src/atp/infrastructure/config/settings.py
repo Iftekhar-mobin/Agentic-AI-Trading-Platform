@@ -58,6 +58,12 @@ class LLMSettings(BaseModel):
     anthropic_api_key: SecretStr | None = None
 
 
+class ExecutionSettings(BaseModel):
+    """Execution settings (env: ``ATP_EXECUTION__*``)."""
+
+    slippage_bps: float = Field(default=5.0, ge=0, le=100)
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings (env: ``ATP_REDIS__*``)."""
 
@@ -92,6 +98,7 @@ class Settings(BaseSettings):
     # Hard risk limits (env: ATP_RISK__*). Enforced by the deterministic
     # risk engine; nothing downstream can loosen them at runtime.
     risk: RiskLimits = Field(default_factory=RiskLimits)
+    execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

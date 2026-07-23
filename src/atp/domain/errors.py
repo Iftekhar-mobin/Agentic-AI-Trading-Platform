@@ -25,3 +25,7 @@ class LLMGenerationError(DomainError):
 
 class OptimizationError(DomainError):
     """Optimization could not produce a valid result (no viable trials, bad splits)."""
+
+
+class ExecutionError(DomainError):
+    """Order execution failed or would corrupt portfolio state."""

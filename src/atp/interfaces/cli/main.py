@@ -9,6 +9,8 @@ Commands:
     atp optimize AAPL -s ema_cross -- optimize strategy parameters (add --walk-forward)
     atp portfolio                  -- show the paper portfolio with live prices
     atp risk-check AAPL --stop 300 -- size a trade and run it through the risk gate
+    atp trade AAPL --stop 300      -- execute through the gate (paper broker)
+    atp orders -n 20               -- show the execution audit trail
     atp serve                      -- start the HTTP API
 """
 
@@ -29,6 +31,7 @@ from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.backtest import BacktestResult
 from atp.domain.models.market import BarInterval
 from atp.domain.models.optimization import OptimizationResult, WalkForwardResult
+from atp.domain.models.orders import Order
 from atp.domain.models.strategy import StrategyDefinition
 from atp.domain.models.trading import OrderSide, Portfolio, RiskDecision
 from atp.domain.strategy_presets import PRESET_SPACES, PRESETS
@@ -82,12 +85,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("portfolio", help="show the paper portfolio")
 
-    risk_check = subparsers.add_parser("risk-check", help="run a trade through the risk gate")
-    risk_check.add_argument("symbol")
-    risk_check.add_argument("--side", choices=["buy", "sell"], default="buy")
-    risk_check.add_argument("--qty", type=Decimal, default=None)
-    risk_check.add_argument("--stop", type=Decimal, default=None, help="stop-loss price")
-    risk_check.add_argument("--take", type=Decimal, default=None, help="take-profit price")
+    for name, help_text in [
+        ("risk-check", "run a trade through the risk gate"),
+        ("trade", "execute a trade through the gate (paper broker)"),
+    ]:
+        command = subparsers.add_parser(name, help=help_text)
+        command.add_argument("symbol")
+        command.add_argument("--side", choices=["buy", "sell"], default="buy")
+        command.add_argument("--qty", type=Decimal, default=None)
+        command.add_argument("--stop", type=Decimal, default=None, help="stop-loss price")
+        command.add_argument("--take", type=Decimal, default=None, help="take-profit price")
+
+    orders = subparsers.add_parser("orders", help="show the execution audit trail")
+    orders.add_argument("-n", "--limit", type=int, default=20)
 
     serve = subparsers.add_parser("serve", help="start the HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
@@ -152,6 +162,30 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
             _print_risk_decision(decision)
             if not decision.approved:
                 raise SystemExit(1)
+            return
+
+        if args.command == "trade":
+            execution = await container.execute_trade.execute(
+                args.symbol,
+                side=OrderSide(args.side),
+                quantity=args.qty,
+                stop_loss=args.stop,
+                take_profit=args.take,
+            )
+            _print_risk_decision(execution.decision)
+            if execution.order is not None:
+                _print_order(execution.order)
+            if not execution.executed:
+                raise SystemExit(1)
+            portfolio = await container.portfolio_repository.load()
+            _print_portfolio(portfolio)
+            return
+
+        if args.command == "orders":
+            records = await container.order_repository.list_records(limit=args.limit)
+            for record in records:
+                _print_order(record.order)
+            log.info("orders.total", count=len(records))
             return
 
         interval = BarInterval(args.interval)
@@ -255,6 +289,21 @@ def _print_portfolio(portfolio: Portfolio) -> None:
             unrealized_pnl=round(float(position.unrealized_pnl), 2),
             unrealized_pnl_pct=round(float(position.unrealized_pnl_pct), 2),
         )
+
+
+def _print_order(order: Order) -> None:
+    log.info(
+        "order",
+        id=order.id,
+        symbol=order.symbol,
+        side=order.side.value,
+        quantity=float(order.quantity),
+        status=order.status.value,
+        fill_price=float(order.fill_price) if order.fill_price else None,
+        submitted_at=order.submitted_at.isoformat(),
+        strategy=order.strategy_name,
+        reason=order.reason,
+    )
 
 
 def _print_risk_decision(decision: RiskDecision) -> None:

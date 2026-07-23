@@ -16,6 +16,7 @@ from atp.application.orchestration import TradingOrchestrator
 from atp.application.use_cases import (
     AnalyzeTicker,
     CheckTradeRisk,
+    ExecuteTrade,
     GetPortfolio,
     GetPriceHistory,
     LoadPriceHistory,
@@ -26,19 +27,23 @@ from atp.application.use_cases import (
 from atp.domain.ports import (
     BacktestEngine,
     BarRepository,
+    Broker,
     IndicatorEngine,
     LLMClient,
     MarketDataProvider,
+    OrderRepository,
     PortfolioRepository,
     StrategyOptimizer,
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
+from atp.infrastructure.brokers import PaperBroker
 from atp.infrastructure.config import Settings, get_settings
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
 from atp.infrastructure.market_data import YFinanceMarketDataProvider
 from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
+from atp.infrastructure.persistence.json_orders import JsonOrderRepository
 from atp.infrastructure.persistence.json_portfolio import JsonPortfolioRepository
 
 
@@ -62,6 +67,9 @@ class Container:
     portfolio_repository: PortfolioRepository
     get_portfolio: GetPortfolio
     check_trade_risk: CheckTradeRisk
+    broker: Broker
+    order_repository: OrderRepository
+    execute_trade: ExecuteTrade
     orchestrator: TradingOrchestrator
 
     @classmethod
@@ -82,6 +90,9 @@ class Container:
             starting_cash=settings.paper_starting_cash,
         )
         get_portfolio = GetPortfolio(portfolio_repository, market_data)
+        check_trade_risk = CheckTradeRisk(get_portfolio, market_data, settings.risk)
+        broker = PaperBroker(market_data, slippage_bps=settings.execution.slippage_bps)
+        order_repository = JsonOrderRepository(settings.data_dir / "orders.jsonl")
         return cls(
             settings=settings,
             engine=engine,
@@ -100,7 +111,12 @@ class Container:
             optimize_strategy=OptimizeStrategy(load_price_history, strategy_optimizer),
             portfolio_repository=portfolio_repository,
             get_portfolio=get_portfolio,
-            check_trade_risk=CheckTradeRisk(get_portfolio, market_data, settings.risk),
+            check_trade_risk=check_trade_risk,
+            broker=broker,
+            order_repository=order_repository,
+            execute_trade=ExecuteTrade(
+                check_trade_risk, broker, portfolio_repository, order_repository
+            ),
             orchestrator=TradingOrchestrator(analyze_ticker),
         )
 
