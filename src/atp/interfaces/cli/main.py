@@ -4,7 +4,8 @@ Commands:
     atp status                     -- show configuration wiring (smoke check)
     atp sync AAPL -i 1d            -- pull bars from the provider into storage
     atp bars AAPL -i 1d -n 10      -- show stored bars
-    atp analyze AAPL -i 1d         -- run the Technical Analysis agent
+    atp analyze AAPL -i 1d         -- run the analysis workflow (supervisor graph)
+    atp serve                      -- start the HTTP API
 """
 
 from __future__ import annotations
@@ -43,9 +44,13 @@ def _build_parser() -> argparse.ArgumentParser:
     bars.add_argument("-i", "--interval", choices=intervals, default="1d")
     bars.add_argument("-n", "--limit", type=int, default=10)
 
-    analyze = subparsers.add_parser("analyze", help="run the Technical Analysis agent")
+    analyze = subparsers.add_parser("analyze", help="run the analysis workflow")
     analyze.add_argument("symbol")
     analyze.add_argument("-i", "--interval", choices=intervals, default="1d")
+
+    serve = subparsers.add_parser("serve", help="start the HTTP API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
 
     return parser
 
@@ -57,6 +62,17 @@ def main() -> None:
 
     if args.command == "status":
         _status(settings)
+        return
+    if args.command == "serve":
+        import uvicorn
+
+        uvicorn.run(
+            "atp.interfaces.api:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            log_level=settings.log_level.lower(),
+        )
         return
     try:
         asyncio.run(_run(args, settings))
@@ -82,9 +98,14 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
         interval = BarInterval(args.interval)
 
         if args.command == "analyze":
-            # No init_db: analysis falls back to the provider when storage is down.
-            report = await container.analyze_ticker.execute(args.symbol, interval)
-            _print_report(report)
+            # Runs through the supervisor graph; no init_db, because analysis
+            # falls back to the live provider when storage is down.
+            state = await container.orchestrator.run(args.symbol, interval)
+            for failure in state.failures:
+                log.error("agent.failure", agent=failure.agent, error=failure.error)
+            if state.technical_report is None:
+                raise SystemExit(1)
+            _print_report(state.technical_report)
             return
 
         await init_db(container.engine)
