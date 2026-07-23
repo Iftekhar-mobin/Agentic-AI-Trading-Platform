@@ -1,13 +1,22 @@
-"""TimescaleDB-backed BarRepository."""
+"""TimescaleDB-backed BarRepository.
+
+Connection failures are translated into the domain's
+``RepositoryUnavailableError`` so callers can degrade gracefully without
+importing SQLAlchemy exception types.
+"""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from atp.domain.errors import RepositoryUnavailableError
 from atp.domain.models.market import Bar, BarInterval, PriceHistory
 from atp.infrastructure.persistence.schema import bars_table
 
@@ -17,6 +26,19 @@ _PRICE_COLUMNS = ("open", "high", "low", "close", "volume")
 class TimescaleBarRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    @asynccontextmanager
+    async def _connect(self, *, begin: bool = False) -> AsyncIterator[AsyncConnection]:
+        try:
+            if begin:
+                async with self._engine.begin() as conn:
+                    yield conn
+            else:
+                async with self._engine.connect() as conn:
+                    yield conn
+        except (OSError, OperationalError, InterfaceError) as exc:
+            msg = f"database unreachable: {exc}"
+            raise RepositoryUnavailableError(msg) from exc
 
     async def upsert_bars(self, history: PriceHistory) -> int:
         if not history.bars:
@@ -39,7 +61,7 @@ class TimescaleBarRepository:
             index_elements=["symbol", "interval", "ts"],
             set_={column: stmt.excluded[column] for column in _PRICE_COLUMNS},
         )
-        async with self._engine.begin() as conn:
+        async with self._connect(begin=True) as conn:
             await conn.execute(stmt)
         return len(rows)
 
@@ -65,7 +87,7 @@ class TimescaleBarRepository:
         if limit is not None:
             query = query.limit(limit)
 
-        async with self._engine.connect() as conn:
+        async with self._connect() as conn:
             rows = (await conn.execute(query)).all()
 
         bars = tuple(
@@ -86,6 +108,6 @@ class TimescaleBarRepository:
             bars_table.c.symbol == symbol,
             bars_table.c.interval == interval.value,
         )
-        async with self._engine.connect() as conn:
+        async with self._connect() as conn:
             result: datetime | None = (await conn.execute(query)).scalar()
         return result

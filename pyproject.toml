@@ -12,6 +12,7 @@ dependencies = [
     "asyncpg>=0.29",
     "pandas>=2.2",
     "yfinance>=0.2.40",
+    "anthropic>=0.116",
 ]
 
 [project.scripts]

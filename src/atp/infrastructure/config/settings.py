@@ -42,6 +42,18 @@ class DatabaseSettings(BaseModel):
         )
 
 
+class LLMSettings(BaseModel):
+    """LLM access settings (env: ``ATP_LLM__*``).
+
+    ``anthropic_api_key`` is optional: when unset, the Anthropic SDK resolves
+    credentials from the environment (``ANTHROPIC_API_KEY`` or an auth profile).
+    """
+
+    model: str = "claude-opus-4-8"
+    max_tokens: int = 16000
+    anthropic_api_key: SecretStr | None = None
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings (env: ``ATP_REDIS__*``)."""
 
@@ -73,6 +85,7 @@ class Settings(BaseSettings):
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
     @property
     def use_json_logs(self) -> bool:

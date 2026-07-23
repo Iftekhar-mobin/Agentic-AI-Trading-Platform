@@ -3,6 +3,7 @@
 from atp.infrastructure.config.settings import (
     DatabaseSettings,
     Environment,
+    LLMSettings,
     RedisSettings,
     Settings,
     TradingMode,
@@ -12,6 +13,7 @@ from atp.infrastructure.config.settings import (
 __all__ = [
     "DatabaseSettings",
     "Environment",
+    "LLMSettings",
     "RedisSettings",
     "Settings",
     "TradingMode",
