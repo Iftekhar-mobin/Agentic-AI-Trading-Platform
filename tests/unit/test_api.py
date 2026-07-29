@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 from factories import (
     make_fundamental_report,
+    make_learning_report,
     make_news_report,
     make_sentiment_report,
     make_technical_report,
@@ -22,6 +23,7 @@ from atp.application.use_cases import (
     AnalyzeNews,
     AnalyzeSentiment,
     AnalyzeTicker,
+    LearnFromContext,
 )
 from atp.composition import Container
 from atp.domain.errors import InsufficientDataError, InsufficientHistoryError
@@ -46,6 +48,22 @@ class StubUseCase:
         return self._report_factory(symbol)
 
 
+class StubLearning:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+
+    async def execute(
+        self,
+        symbol: str,
+        interval: BarInterval = BarInterval.DAY_1,
+        *,
+        situation: str,
+    ) -> BaseModel:
+        if self._error is not None:
+            raise self._error
+        return make_learning_report(symbol)
+
+
 def make_client(**errors: Exception) -> TestClient:
     orchestrator = TradingOrchestrator(
         cast(AnalyzeTicker, StubUseCase(make_technical_report, error=errors.get("technical"))),
@@ -58,6 +76,7 @@ def make_client(**errors: Exception) -> TestClient:
             AnalyzeSentiment,
             StubUseCase(make_sentiment_report, error=errors.get("sentiment")),
         ),
+        cast(LearnFromContext, StubLearning(error=errors.get("learning"))),
     )
     container = Container.build(Settings(_env_file=None))
     container = dataclasses.replace(container, orchestrator=orchestrator)
@@ -84,6 +103,7 @@ def test_analysis_success(client: TestClient) -> None:
     assert body["symbol"] == "AAPL"
     assert body["interval"] == "1d"
     assert sorted(body["completed_agents"]) == [
+        "continuous_learning",
         "fundamental_analysis",
         "news_analysis",
         "sentiment_analysis",
@@ -99,6 +119,8 @@ def test_analysis_success(client: TestClient) -> None:
     assert body["news_report"]["assessment"]["key_themes"] == ["product cycle"]
     assert body["sentiment_report"]["summary"]["weighted_polarity"] == 0.8
     assert body["sentiment_report"]["model_name"] == "lexicon-v1"
+    assert body["learning_report"]["entry"]["lessons"]
+    assert body["learning_report"]["regime"]["trend"] == "uptrend"
 
 
 def test_agent_selection_is_honoured(client: TestClient) -> None:
@@ -110,6 +132,7 @@ def test_agent_selection_is_honoured(client: TestClient) -> None:
     assert body["completed_agents"] == ["news_analysis"]
     assert body["news_report"] is not None
     assert body["technical_report"] is None
+    assert body["learning_report"] is None
 
 
 def test_unknown_agent_returns_422(client: TestClient) -> None:

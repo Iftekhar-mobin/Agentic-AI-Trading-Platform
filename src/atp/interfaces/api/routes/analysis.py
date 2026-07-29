@@ -10,13 +10,14 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from atp.application.orchestration import (
-    ANALYSIS_AGENTS,
+    ALL_AGENTS,
     TradingOrchestrator,
     UnknownAgentError,
 )
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
 from atp.domain.models.sentiment import SentimentReport
 from atp.interfaces.api.schemas import AgentFailureSchema
@@ -29,7 +30,7 @@ class AnalysisRequest(BaseModel):
     interval: BarInterval = BarInterval.DAY_1
     agents: list[str] = Field(
         default_factory=list,
-        description=f"Subset of {list(ANALYSIS_AGENTS)}; empty runs all of them",
+        description=f"Subset of {list(ALL_AGENTS)}; empty runs all of them",
         examples=[["technical_analysis", "news_analysis"]],
     )
 
@@ -47,6 +48,7 @@ class AnalysisResponse(BaseModel):
     fundamental_report: FundamentalReport | None = None
     news_report: NewsReport | None = None
     sentiment_report: SentimentReport | None = None
+    learning_report: LearningReport | None = None
 
 
 def _orchestrator(request: Request) -> TradingOrchestrator:
@@ -81,4 +83,5 @@ async def run_analysis(request: AnalysisRequest, http_request: Request) -> Analy
         fundamental_report=state.fundamental_report,
         news_report=state.news_report,
         sentiment_report=state.sentiment_report,
+        learning_report=state.learning_report,
     )

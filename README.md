@@ -17,7 +17,7 @@ explainable.
 ```bash
 uv sync                    # create venv, install Python 3.12 + dependencies
 cp .env.example .env       # local configuration
-docker compose up -d       # start TimescaleDB + Redis
+docker compose up -d       # start TimescaleDB + Redis + Qdrant
 uv run atp status          # smoke command: prints configuration wiring
 uv run atp sync AAPL       # pull daily bars into TimescaleDB
 uv run atp bars AAPL -n 5  # show the 5 most recent stored bars
@@ -47,14 +47,13 @@ Integration tests skip automatically when the database is not running.
 | `uv run ruff format .` | format |
 | `uv run mypy` | strict type checking |
 | `uv run pre-commit install` | enable git hooks (once) |
-| `docker compose up -d` | start TimescaleDB + Redis |
+| `docker compose up -d` | start TimescaleDB + Redis + Qdrant |
 
 CI (GitHub Actions) runs format check, lint, mypy, and tests on every push/PR.
 
 ## Analysis agents
 
-`atp analyze` (and `POST /analysis`) dispatches four specialists concurrently
-through the supervisor graph:
+`atp analyze` (and `POST /analysis`) runs the supervisor graph over five specialists:
 
 | Agent | Deterministic layer | LLM layer |
 |-------|---------------------|-----------|
@@ -62,14 +61,34 @@ through the supervisor graph:
 | `fundamental_analysis` | threshold rules over a fundamentals snapshot | interprets, sector-adjusts |
 | `news_analysis` | — (article retrieval only) | themes, catalysts, materiality |
 | `sentiment_analysis` | FinBERT/lexicon scores + recency-weighted aggregate | interprets the aggregate |
+| `continuous_learning` | regime tagging + semantic recall from the journal | compares now to precedent |
 
-An agent that fails is reported in `failures`; the others still return their work.
+The first four run concurrently; `continuous_learning` runs after them, because it
+reflects on what they concluded. An agent that fails is reported in `failures`; the
+others still return their work.
 
 Sentiment defaults to a transparent offline lexicon classifier. For real FinBERT:
 
 ```bash
 uv sync --extra finbert
 ATP_SENTIMENT__MODEL=finbert uv run atp analyze AAPL -a sentiment_analysis
+```
+
+## Memory
+
+Every analysis and every trade — fills and risk rejections alike — is journalled as
+a regime-tagged episode, then recalled semantically on later runs:
+
+```bash
+uv run atp memory AAPL                      # recall episodes for a symbol
+uv run atp memory AAPL -q "breakout entry"  # recall by free-text query
+```
+
+Storage defaults to a local file so the loop works with nothing running. Point it at
+Qdrant (`docker compose up -d`) for production:
+
+```bash
+ATP_MEMORY__BACKEND=qdrant uv run atp analyze AAPL
 ```
 
 ## Safety defaults

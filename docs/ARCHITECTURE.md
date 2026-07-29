@@ -63,7 +63,9 @@ Supervisor (StateGraph router)
   ├── strategy pool      : strategy_generation → backtesting → optimization
   ├── decision pool      : risk_management (veto power) → portfolio
   ├── execution          : trade_execution (paper first, gated live)
-  └── feedback           : continuous_learning (writes to episodic memory)
+  └── feedback           : continuous_learning (recalls precedent, writes
+                           back to episodic memory; runs after the analysis
+                           pool because it reflects on that pool's output)
 ```
 
 Risk Management is a **hard gate**: no order reaches the execution agent without a
@@ -161,6 +163,16 @@ Each milestone ends with working, tested, demoable software.
   not need, and the suite must run offline. The default adapter is a real
   Loughran-McDonald-style lexicon classifier — blunt, but deterministic and
   explainable — so the sentiment pipeline is meaningfully testable without it.
+- **Embeddings behind a port, hashing by default** — episodic memory needs
+  vectors, and Anthropic has no embeddings API, so the alternative to a port was
+  a hard dependency on a second vendor. The default adapter is a deterministic
+  hashed bag-of-ngrams: it captures lexical overlap only, but it makes storage,
+  filtering and ranking testable end to end with no network. A hosted embedding
+  model is a new adapter and one line in the composition root.
+- **Memory degrades, never blocks** — an unreachable vector store, a missing
+  regime, a failed write: each is logged and the reflection still returns. An
+  analysis workflow that fails because a database is down is a worse trade than
+  one that returns without precedent.
 - **Analysis agents fan out** — technical, fundamental, news and sentiment are
   independent (none reads another's output), so the supervisor dispatches them
   in one superstep. That is four LLM round-trips of latency collapsed into one.

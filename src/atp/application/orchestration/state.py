@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
 from atp.domain.models.sentiment import SentimentReport
 
@@ -42,13 +43,19 @@ class TradingState(BaseModel):
     news_report: NewsReport | None = None
     sentiment_report: SentimentReport | None = None
 
+    # Produced by the feedback pool, after the analysis pool has run
+    learning_report: LearningReport | None = None
+
     # Bookkeeping
     completed: Annotated[list[str], operator.add] = Field(default_factory=list)
     failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
 
     @property
-    def has_report(self) -> bool:
-        """True when at least one agent produced an artifact."""
+    def has_analysis(self) -> bool:
+        """True when at least one analysis agent produced an artifact.
+
+        This gates the learning phase: reflecting on nothing is not useful.
+        """
         return any(
             report is not None
             for report in (
@@ -58,3 +65,8 @@ class TradingState(BaseModel):
                 self.sentiment_report,
             )
         )
+
+    @property
+    def has_report(self) -> bool:
+        """True when at least one agent of any pool produced an artifact."""
+        return self.has_analysis or self.learning_report is not None

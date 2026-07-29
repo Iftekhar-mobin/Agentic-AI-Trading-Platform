@@ -20,6 +20,16 @@ from atp.domain.models.fundamentals import (
     Fundamentals,
 )
 from atp.domain.models.market import BarInterval
+from atp.domain.models.memory import (
+    EpisodeKind,
+    EpisodeMatch,
+    JournalEntry,
+    LearningReport,
+    MemoryEpisode,
+    RegimeTag,
+    RegimeTrend,
+    RegimeVolatility,
+)
 from atp.domain.models.news import NewsArticle, NewsAssessment, NewsReport
 from atp.domain.models.sentiment import (
     ScoredArticle,
@@ -157,5 +167,52 @@ def make_sentiment_report(symbol: str = "AAPL") -> SentimentReport:
             confidence=0.45,
             evidence=(Evidence(source="article-0", statement="Positive headline."),),
             invalidation_conditions=("A negative earnings pre-announcement.",),
+        ),
+    )
+
+
+def make_regime(
+    trend: RegimeTrend = RegimeTrend.UPTREND,
+    volatility: RegimeVolatility = RegimeVolatility.NORMAL,
+) -> RegimeTag:
+    return RegimeTag(
+        trend=trend,
+        volatility=volatility,
+        as_of=AS_OF,
+        metrics={"sma_fast": 320.0, "sma_slow": 310.0, "vol_ratio": 1.0},
+    )
+
+
+def make_episode(
+    identifier: str = "episode-0",
+    *,
+    symbol: str = "AAPL",
+    kind: EpisodeKind = EpisodeKind.ANALYSIS,
+    summary: str = "Technical bullish, news supportive.",
+) -> MemoryEpisode:
+    return MemoryEpisode(
+        id=identifier,
+        symbol=symbol,
+        kind=kind,
+        occurred_at=AS_OF - timedelta(days=30),
+        summary=summary,
+        regime=make_regime(),
+        metadata={"recalled": 0},
+    )
+
+
+def make_learning_report(symbol: str = "AAPL") -> LearningReport:
+    return LearningReport(
+        symbol=symbol,
+        as_of=AS_OF,
+        regime=make_regime(),
+        recalled=(EpisodeMatch(episode=make_episode(symbol=symbol), score=0.62),),
+        entry=JournalEntry(
+            reasoning="The setup rhymes with a precedent from a calmer tape.",
+            confidence=0.4,
+            evidence=(Evidence(source="episode-0", statement="Similar bullish setup."),),
+            invalidation_conditions=("Volatility regime shifting to volatile.",),
+            lessons=("Entries against the slow-SMA slope gave back gains.",),
+            regime_note="The precedent happened in the same uptrend but calmer volatility.",
         ),
     )

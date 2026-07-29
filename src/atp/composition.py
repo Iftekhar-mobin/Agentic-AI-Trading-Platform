@@ -13,6 +13,7 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from atp.application.agents import (
+    ContinuousLearningAgent,
     FundamentalAnalysisAgent,
     NewsAgent,
     SentimentAgent,
@@ -28,6 +29,8 @@ from atp.application.use_cases import (
     ExecuteTrade,
     GetPortfolio,
     GetPriceHistory,
+    JournalTrade,
+    LearnFromContext,
     LoadNews,
     LoadPriceHistory,
     OptimizeStrategy,
@@ -38,6 +41,8 @@ from atp.domain.ports import (
     BacktestEngine,
     BarRepository,
     Broker,
+    EmbeddingModel,
+    EpisodicMemory,
     FundamentalsProvider,
     IndicatorEngine,
     LLMClient,
@@ -50,11 +55,18 @@ from atp.domain.ports import (
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
 from atp.infrastructure.brokers import PaperBroker
-from atp.infrastructure.config import SentimentModelName, Settings, get_settings
+from atp.infrastructure.config import (
+    MemoryBackend,
+    SentimentModelName,
+    Settings,
+    get_settings,
+)
+from atp.infrastructure.embeddings import HashingEmbeddingModel
 from atp.infrastructure.fundamentals import YFinanceFundamentalsProvider
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
 from atp.infrastructure.market_data import YFinanceMarketDataProvider
+from atp.infrastructure.memory import JsonEpisodicMemory, QdrantEpisodicMemory
 from atp.infrastructure.news import YFinanceNewsProvider
 from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
@@ -78,6 +90,9 @@ class Container:
     sentiment_model: SentimentModel
     news_agent: NewsAgent
     sentiment_agent: SentimentAgent
+    embedding_model: EmbeddingModel
+    memory: EpisodicMemory
+    continuous_learning_agent: ContinuousLearningAgent
     backtest_engine: BacktestEngine
     strategy_optimizer: StrategyOptimizer
     sync_market_data: SyncMarketData
@@ -88,6 +103,8 @@ class Container:
     analyze_fundamentals: AnalyzeFundamentals
     analyze_news: AnalyzeNews
     analyze_sentiment: AnalyzeSentiment
+    learn_from_context: LearnFromContext
+    journal_trade: JournalTrade
     run_backtest: RunBacktest
     optimize_strategy: OptimizeStrategy
     portfolio_repository: PortfolioRepository
@@ -130,6 +147,16 @@ class Container:
         analyze_news = AnalyzeNews(load_news, news_agent)
         analyze_sentiment = AnalyzeSentiment(load_news, sentiment_agent)
 
+        embedding_model = HashingEmbeddingModel(settings.memory.embedding_dimensions)
+        memory = cls._build_memory(settings, embedding_model)
+        continuous_learning_agent = ContinuousLearningAgent(llm)
+        learn_from_context = LearnFromContext(
+            load_price_history,
+            memory,
+            continuous_learning_agent,
+            recall_limit=settings.memory.recall_limit,
+        )
+
         backtest_engine = BacktestingPyEngine()
         strategy_optimizer = OptunaStrategyOptimizer(backtest_engine)
         portfolio_repository = JsonPortfolioRepository(
@@ -164,6 +191,11 @@ class Container:
             analyze_fundamentals=analyze_fundamentals,
             analyze_news=analyze_news,
             analyze_sentiment=analyze_sentiment,
+            embedding_model=embedding_model,
+            memory=memory,
+            continuous_learning_agent=continuous_learning_agent,
+            learn_from_context=learn_from_context,
+            journal_trade=JournalTrade(memory),
             run_backtest=RunBacktest(load_price_history, backtest_engine),
             optimize_strategy=OptimizeStrategy(load_price_history, strategy_optimizer),
             portfolio_repository=portfolio_repository,
@@ -175,9 +207,31 @@ class Container:
                 check_trade_risk, broker, portfolio_repository, order_repository
             ),
             orchestrator=TradingOrchestrator(
-                analyze_ticker, analyze_fundamentals, analyze_news, analyze_sentiment
+                analyze_ticker,
+                analyze_fundamentals,
+                analyze_news,
+                analyze_sentiment,
+                learn_from_context,
             ),
         )
+
+    @staticmethod
+    def _build_memory(settings: Settings, embeddings: EmbeddingModel) -> EpisodicMemory:
+        """Pick the episodic memory backend.
+
+        The Qdrant client is constructed lazily-ish: creating it opens no
+        connection, so choosing this backend costs nothing until the first
+        recall or write.
+        """
+        if settings.memory.backend is MemoryBackend.QDRANT:
+            from qdrant_client import AsyncQdrantClient
+
+            return QdrantEpisodicMemory(
+                AsyncQdrantClient(url=settings.memory.qdrant_url),
+                embeddings,
+                collection=settings.memory.qdrant_collection,
+            )
+        return JsonEpisodicMemory(settings.data_dir / "memory.jsonl", embeddings)
 
     @staticmethod
     def _build_sentiment_model(settings: Settings) -> SentimentModel:

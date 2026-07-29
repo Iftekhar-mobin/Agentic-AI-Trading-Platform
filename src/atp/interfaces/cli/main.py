@@ -12,6 +12,7 @@ Commands:
     atp risk-check AAPL --stop 300 -- size a trade and run it through the risk gate
     atp trade AAPL --stop 300      -- execute through the gate (paper broker)
     atp orders -n 20               -- show the execution audit trail
+    atp memory AAPL -q "breakout"  -- recall episodes from the trade journal
     atp serve                      -- start the HTTP API
 """
 
@@ -26,7 +27,7 @@ from pathlib import Path
 import structlog
 
 from atp import __version__
-from atp.application.orchestration import ANALYSIS_AGENTS, TradingState, UnknownAgentError
+from atp.application.orchestration import ALL_AGENTS, TradingState, UnknownAgentError
 from atp.composition import Container
 from atp.domain.errors import DomainError
 from atp.domain.models.analysis import TechnicalReport
@@ -34,6 +35,7 @@ from atp.domain.models.backtest import BacktestResult
 from atp.domain.models.explainability import Explanation
 from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.memory import EpisodeMatch, LearningReport
 from atp.domain.models.news import NewsReport
 from atp.domain.models.optimization import OptimizationResult, WalkForwardResult
 from atp.domain.models.orders import Order
@@ -72,10 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "-a",
         "--agents",
         default=None,
-        help=(
-            "comma-separated subset of "
-            f"{','.join(ANALYSIS_AGENTS)} (default: all, dispatched in parallel)"
-        ),
+        help=(f"comma-separated subset of {','.join(ALL_AGENTS)} (default: all)"),
     )
 
     backtest = subparsers.add_parser("backtest", help="backtest a strategy")
@@ -113,6 +112,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     orders = subparsers.add_parser("orders", help="show the execution audit trail")
     orders.add_argument("-n", "--limit", type=int, default=20)
+
+    memory = subparsers.add_parser("memory", help="recall episodes from the trade journal")
+    memory.add_argument("symbol")
+    memory.add_argument(
+        "-q", "--query", default=None, help="free-text query (default: the symbol itself)"
+    )
+    memory.add_argument("-n", "--limit", type=int, default=10)
 
     serve = subparsers.add_parser("serve", help="start the HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
@@ -190,10 +196,22 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
             _print_risk_decision(execution.decision)
             if execution.order is not None:
                 _print_order(execution.order)
+            # Journal every outcome, rejections included: "the gate refused
+            # this" is a precedent worth recalling later.
+            await container.journal_trade.execute(execution)
             if not execution.executed:
                 raise SystemExit(1)
             portfolio = await container.portfolio_repository.load()
             _print_portfolio(portfolio)
+            return
+
+        if args.command == "memory":
+            matches = await container.memory.recall(
+                args.query or args.symbol, symbol=args.symbol, limit=args.limit
+            )
+            for match in matches:
+                _print_episode(match)
+            log.info("memory.total", symbol=args.symbol.upper(), count=len(matches))
             return
 
         if args.command == "orders":
@@ -428,6 +446,37 @@ def _print_explanation(prefix: str, explanation: Explanation) -> None:
         log.info(f"{prefix}.invalidation", condition=condition)
 
 
+def _print_episode(match: EpisodeMatch) -> None:
+    episode = match.episode
+    log.info(
+        "episode",
+        id=episode.id,
+        kind=episode.kind.value,
+        occurred_at=episode.occurred_at.isoformat(),
+        regime=episode.regime.label if episode.regime else None,
+        similarity=round(match.score, 4),
+        summary=episode.summary,
+    )
+
+
+def _print_learning(report: LearningReport) -> None:
+    for match in report.recalled:
+        _print_episode(match)
+    entry = report.entry
+    log.info(
+        "learning.report",
+        symbol=report.symbol,
+        as_of=report.as_of.isoformat(),
+        regime=report.regime.label if report.regime else None,
+        recalled=len(report.recalled),
+        confidence=entry.confidence,
+    )
+    log.info("learning.regime_note", text=entry.regime_note)
+    for lesson in entry.lessons:
+        log.info("learning.lesson", text=lesson)
+    _print_explanation("learning", entry)
+
+
 def _print_analysis(state: TradingState) -> None:
     if state.technical_report is not None:
         _print_report(state.technical_report)
@@ -437,6 +486,8 @@ def _print_analysis(state: TradingState) -> None:
         _print_news(state.news_report)
     if state.sentiment_report is not None:
         _print_sentiment(state.sentiment_report)
+    if state.learning_report is not None:
+        _print_learning(state.learning_report)
 
 
 def _print_report(report: TechnicalReport) -> None:

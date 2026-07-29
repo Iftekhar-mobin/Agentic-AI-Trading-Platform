@@ -91,6 +91,27 @@ class SentimentSettings(BaseModel):
     )
 
 
+class MemoryBackend(StrEnum):
+    JSON = "json"
+    QDRANT = "qdrant"
+
+
+class MemorySettings(BaseModel):
+    """Episodic memory settings (env: ``ATP_MEMORY__*``).
+
+    ``json`` is the offline default; ``qdrant`` needs the service from
+    docker-compose. Changing ``embedding_dimensions`` changes the vector space,
+    which orphans anything already stored — the adapters filter old rows out
+    rather than comparing across spaces.
+    """
+
+    backend: MemoryBackend = MemoryBackend.JSON
+    embedding_dimensions: int = Field(default=256, ge=8, le=4096)
+    recall_limit: int = Field(default=5, ge=1, le=50)
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "atp_episodes"
+
+
 class ExecutionSettings(BaseModel):
     """Execution settings (env: ``ATP_EXECUTION__*``)."""
 
@@ -134,6 +155,7 @@ class Settings(BaseSettings):
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     news: NewsSettings = Field(default_factory=NewsSettings)
     sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
+    memory: MemorySettings = Field(default_factory=MemorySettings)
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
