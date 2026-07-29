@@ -4,7 +4,8 @@ Commands:
     atp status                     -- show configuration wiring (smoke check)
     atp sync AAPL -i 1d            -- pull bars from the provider into storage
     atp bars AAPL -i 1d -n 10      -- show stored bars
-    atp analyze AAPL -i 1d         -- run the analysis workflow (supervisor graph)
+    atp analyze AAPL -i 1d         -- run every analysis agent (supervisor graph)
+    atp analyze AAPL -a news_analysis,sentiment_analysis  -- run a subset
     atp backtest AAPL -s ema_cross -- backtest a strategy preset (or -f file.json)
     atp optimize AAPL -s ema_cross -- optimize strategy parameters (add --walk-forward)
     atp portfolio                  -- show the paper portfolio with live prices
@@ -25,13 +26,18 @@ from pathlib import Path
 import structlog
 
 from atp import __version__
+from atp.application.orchestration import ANALYSIS_AGENTS, TradingState, UnknownAgentError
 from atp.composition import Container
 from atp.domain.errors import DomainError
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.backtest import BacktestResult
+from atp.domain.models.explainability import Explanation
+from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.news import NewsReport
 from atp.domain.models.optimization import OptimizationResult, WalkForwardResult
 from atp.domain.models.orders import Order
+from atp.domain.models.sentiment import SentimentReport
 from atp.domain.models.strategy import StrategyDefinition
 from atp.domain.models.trading import OrderSide, Portfolio, RiskDecision
 from atp.domain.strategy_presets import PRESET_SPACES, PRESETS
@@ -62,6 +68,15 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze = subparsers.add_parser("analyze", help="run the analysis workflow")
     analyze.add_argument("symbol")
     analyze.add_argument("-i", "--interval", choices=intervals, default="1d")
+    analyze.add_argument(
+        "-a",
+        "--agents",
+        default=None,
+        help=(
+            "comma-separated subset of "
+            f"{','.join(ANALYSIS_AGENTS)} (default: all, dispatched in parallel)"
+        ),
+    )
 
     backtest = subparsers.add_parser("backtest", help="backtest a strategy")
     backtest.add_argument("symbol")
@@ -193,12 +208,17 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
         if args.command == "analyze":
             # Runs through the supervisor graph; no init_db, because analysis
             # falls back to the live provider when storage is down.
-            state = await container.orchestrator.run(args.symbol, interval)
+            agents = args.agents.split(",") if args.agents else None
+            try:
+                state = await container.orchestrator.run(args.symbol, interval, agents=agents)
+            except UnknownAgentError as exc:
+                log.error("analyze.unknown_agents", error=str(exc))
+                raise SystemExit(1) from exc
             for failure in state.failures:
                 log.error("agent.failure", agent=failure.agent, error=failure.error)
-            if state.technical_report is None:
+            if not state.has_report:
                 raise SystemExit(1)
-            _print_report(state.technical_report)
+            _print_analysis(state)
             return
 
         if args.command == "backtest":
@@ -399,6 +419,26 @@ def _print_backtest(result: BacktestResult) -> None:
         )
 
 
+def _print_explanation(prefix: str, explanation: Explanation) -> None:
+    """Print the envelope every agent carries: why, on what, and what refutes it."""
+    log.info(f"{prefix}.reasoning", text=explanation.reasoning)
+    for evidence in explanation.evidence:
+        log.info(f"{prefix}.evidence", source=evidence.source, statement=evidence.statement)
+    for condition in explanation.invalidation_conditions:
+        log.info(f"{prefix}.invalidation", condition=condition)
+
+
+def _print_analysis(state: TradingState) -> None:
+    if state.technical_report is not None:
+        _print_report(state.technical_report)
+    if state.fundamental_report is not None:
+        _print_fundamentals(state.fundamental_report)
+    if state.news_report is not None:
+        _print_news(state.news_report)
+    if state.sentiment_report is not None:
+        _print_sentiment(state.sentiment_report)
+
+
 def _print_report(report: TechnicalReport) -> None:
     for reading in report.readings:
         log.info(
@@ -417,11 +457,84 @@ def _print_report(report: TechnicalReport) -> None:
         confidence=assessment.confidence,
         signal_counts={d.value: n for d, n in report.signal_counts.items()},
     )
-    log.info("analysis.reasoning", text=assessment.reasoning)
-    for evidence in assessment.evidence:
-        log.info("analysis.evidence", source=evidence.source, statement=evidence.statement)
-    for condition in assessment.invalidation_conditions:
-        log.info("analysis.invalidation", condition=condition)
+    _print_explanation("analysis", assessment)
+
+
+def _print_fundamentals(report: FundamentalReport) -> None:
+    for reading in report.readings:
+        log.info(
+            "fundamental",
+            name=reading.name,
+            category=reading.category.value,
+            direction=reading.direction.value,
+            summary=reading.summary,
+        )
+    assessment = report.assessment
+    log.info(
+        "fundamentals.assessment",
+        symbol=report.symbol,
+        as_of=report.as_of.isoformat(),
+        sector=report.fundamentals.sector,
+        industry=report.fundamentals.industry,
+        direction=assessment.direction.value,
+        confidence=assessment.confidence,
+        signal_counts={d.value: n for d, n in report.signal_counts.items()},
+    )
+    _print_explanation("fundamentals", assessment)
+
+
+def _print_news(report: NewsReport) -> None:
+    for article in report.articles:
+        log.info(
+            "article",
+            id=article.id,
+            published=article.published_at.isoformat(),
+            publisher=article.publisher,
+            title=article.title,
+        )
+    assessment = report.assessment
+    log.info(
+        "news.assessment",
+        symbol=report.symbol,
+        as_of=report.as_of.isoformat(),
+        lookback_days=report.lookback_days,
+        articles=len(report.articles),
+        direction=assessment.direction.value,
+        confidence=assessment.confidence,
+        themes=list(assessment.key_themes),
+    )
+    _print_explanation("news", assessment)
+
+
+def _print_sentiment(report: SentimentReport) -> None:
+    for item in report.scored_articles:
+        log.info(
+            "sentiment.article",
+            id=item.article.id,
+            label=item.sentiment.label.value,
+            confidence=item.sentiment.confidence,
+            title=item.article.title,
+        )
+    summary = report.summary
+    assessment = report.assessment
+    log.info(
+        "sentiment.summary",
+        symbol=report.symbol,
+        as_of=report.as_of.isoformat(),
+        classifier=report.model_name,
+        articles=summary.article_count,
+        label_counts={label.value: n for label, n in summary.label_counts.items()},
+        mean_polarity=round(summary.mean_polarity, 4),
+        weighted_polarity=round(summary.weighted_polarity, 4),
+        aggregate_direction=summary.direction.value,
+    )
+    log.info(
+        "sentiment.assessment",
+        symbol=report.symbol,
+        direction=assessment.direction.value,
+        confidence=assessment.confidence,
+    )
+    _print_explanation("sentiment", assessment)
 
 
 if __name__ == "__main__":

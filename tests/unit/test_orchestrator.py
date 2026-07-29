@@ -1,83 +1,176 @@
-"""Tests for the supervisor graph, with the analysis use case stubbed."""
+"""Tests for the supervisor graph, with every analysis use case stubbed."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from collections.abc import Callable
 from typing import cast
 
-from atp.application.orchestration import TradingOrchestrator
-from atp.application.use_cases import AnalyzeTicker
-from atp.domain.errors import InsufficientHistoryError
-from atp.domain.models.analysis import (
-    SignalDirection,
-    TechnicalAssessment,
-    TechnicalReport,
+import pytest
+from factories import (
+    make_fundamental_report,
+    make_news_report,
+    make_sentiment_report,
+    make_technical_report,
 )
-from atp.domain.models.explainability import Evidence
+from pydantic import BaseModel
+
+from atp.application.orchestration import (
+    ANALYSIS_AGENTS,
+    TradingOrchestrator,
+    UnknownAgentError,
+    resolve_agents,
+)
+from atp.application.use_cases import (
+    AnalyzeFundamentals,
+    AnalyzeNews,
+    AnalyzeSentiment,
+    AnalyzeTicker,
+)
+from atp.domain.errors import InsufficientDataError, InsufficientHistoryError
+from atp.domain.models.analysis import SignalDirection
 from atp.domain.models.market import BarInterval
 
 
-def make_report(symbol: str = "AAPL") -> TechnicalReport:
-    return TechnicalReport(
-        symbol=symbol,
-        interval=BarInterval.DAY_1,
-        as_of=datetime(2026, 7, 22, tzinfo=UTC),
-        latest_close=325.89,
-        readings=(),
-        signal_counts=dict.fromkeys(SignalDirection, 0),
-        assessment=TechnicalAssessment(
-            direction=SignalDirection.BULLISH,
-            reasoning="Trend indicators align.",
-            confidence=0.7,
-            evidence=(Evidence(source="sma_trend", statement="Above SMA(50)."),),
-            invalidation_conditions=("Close below SMA(50).",),
-        ),
-    )
+class StubUseCase:
+    """Records its calls and either returns a report or raises."""
 
-
-class StubAnalyzeTicker:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        report_factory: Callable[[str], BaseModel],
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self._report_factory = report_factory
         self._error = error
         self.calls: list[str] = []
+        self.started = asyncio.Event()
+        self.release: asyncio.Event | None = None
 
-    async def execute(
-        self, symbol: str, interval: BarInterval = BarInterval.DAY_1
-    ) -> TechnicalReport:
+    async def execute(self, symbol: str, interval: BarInterval = BarInterval.DAY_1) -> BaseModel:
         self.calls.append(symbol)
+        self.started.set()
+        if self.release is not None:
+            await self.release.wait()
         if self._error is not None:
             raise self._error
-        return make_report(symbol)
+        return self._report_factory(symbol)
 
 
-def make_orchestrator(stub: StubAnalyzeTicker) -> TradingOrchestrator:
-    return TradingOrchestrator(cast(AnalyzeTicker, stub))
+class Stubs:
+    """One stub per analysis agent, wired into a real orchestrator."""
+
+    def __init__(self, **errors: Exception) -> None:
+        self.technical = StubUseCase(make_technical_report, error=errors.get("technical"))
+        self.fundamental = StubUseCase(make_fundamental_report, error=errors.get("fundamental"))
+        self.news = StubUseCase(make_news_report, error=errors.get("news"))
+        self.sentiment = StubUseCase(make_sentiment_report, error=errors.get("sentiment"))
+
+    def orchestrator(self) -> TradingOrchestrator:
+        return TradingOrchestrator(
+            cast(AnalyzeTicker, self.technical),
+            cast(AnalyzeFundamentals, self.fundamental),
+            cast(AnalyzeNews, self.news),
+            cast(AnalyzeSentiment, self.sentiment),
+        )
 
 
-async def test_successful_run_produces_report() -> None:
-    stub = StubAnalyzeTicker()
-    state = await make_orchestrator(stub).run(" aapl ")
+async def test_all_agents_run_and_produce_reports() -> None:
+    stubs = Stubs()
+    state = await stubs.orchestrator().run(" aapl ")
 
     assert state.symbol == "AAPL"
-    assert state.technical_report is not None
-    assert state.technical_report.assessment.direction is SignalDirection.BULLISH
-    assert state.completed == ["technical_analysis"]
+    assert sorted(state.completed) == sorted(ANALYSIS_AGENTS)
     assert state.failures == []
-    assert stub.calls == ["AAPL"]
+    assert state.technical_report is not None
+    assert state.fundamental_report is not None
+    assert state.news_report is not None
+    assert state.sentiment_report is not None
+    assert state.technical_report.assessment.direction is SignalDirection.BULLISH
+    assert stubs.technical.calls == ["AAPL"]
 
 
-async def test_agent_runs_exactly_once() -> None:
-    stub = StubAnalyzeTicker()
-    await make_orchestrator(stub).run("AAPL")
-    assert len(stub.calls) == 1
+async def test_each_agent_runs_exactly_once() -> None:
+    stubs = Stubs()
+    await stubs.orchestrator().run("AAPL")
+
+    for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment):
+        assert len(stub.calls) == 1
 
 
-async def test_agent_failure_is_recorded_not_raised() -> None:
-    stub = StubAnalyzeTicker(error=InsufficientHistoryError("only 3 bars"))
-    state = await make_orchestrator(stub).run("AAPL")
+async def test_agents_are_dispatched_concurrently() -> None:
+    """Every agent starts before any is allowed to finish — i.e. one superstep."""
+    stubs = Stubs()
+    release = asyncio.Event()
+    for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment):
+        stub.release = release
+
+    run = asyncio.create_task(stubs.orchestrator().run("AAPL"))
+    await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                stub.started.wait()
+                for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment)
+            )
+        ),
+        timeout=5,
+    )
+    release.set()
+    state = await asyncio.wait_for(run, timeout=5)
+
+    assert sorted(state.completed) == sorted(ANALYSIS_AGENTS)
+
+
+async def test_agent_selection_runs_only_the_requested_agents() -> None:
+    stubs = Stubs()
+    state = await stubs.orchestrator().run("AAPL", agents=["news_analysis"])
+
+    assert state.completed == ["news_analysis"]
+    assert state.news_report is not None
+    assert state.technical_report is None
+    assert stubs.technical.calls == []
+    assert stubs.news.calls == ["AAPL"]
+
+
+async def test_unknown_agent_is_rejected() -> None:
+    with pytest.raises(UnknownAgentError, match="astrology"):
+        await Stubs().orchestrator().run("AAPL", agents=["astrology"])
+
+
+async def test_one_failure_does_not_cost_the_other_reports() -> None:
+    stubs = Stubs(technical=InsufficientHistoryError("only 3 bars"))
+    state = await stubs.orchestrator().run("AAPL")
 
     assert state.technical_report is None
     assert len(state.failures) == 1
     assert state.failures[0].agent == "technical_analysis"
     assert "3 bars" in state.failures[0].error
     # The failed agent is marked completed so the supervisor never retries it in-run.
-    assert state.completed == ["technical_analysis"]
+    assert sorted(state.completed) == sorted(ANALYSIS_AGENTS)
+    assert state.has_report
+    assert state.news_report is not None
+
+
+async def test_total_failure_leaves_no_report() -> None:
+    stubs = Stubs(
+        technical=InsufficientHistoryError("no bars"),
+        fundamental=InsufficientDataError("no metrics"),
+        news=InsufficientDataError("no articles"),
+        sentiment=InsufficientDataError("no articles"),
+    )
+    state = await stubs.orchestrator().run("AAPL")
+
+    assert not state.has_report
+    assert len(state.failures) == len(ANALYSIS_AGENTS)
+
+
+def test_resolve_agents_normalizes_and_orders() -> None:
+    assert resolve_agents(None) == ANALYSIS_AGENTS
+    assert resolve_agents([]) == ANALYSIS_AGENTS
+    # Canonical dispatch order wins over the order the caller listed them in.
+    assert resolve_agents(["news_analysis", " TECHNICAL_ANALYSIS "]) == (
+        "technical_analysis",
+        "news_analysis",
+    )
+    with pytest.raises(UnknownAgentError):
+        resolve_agents(["nope"])

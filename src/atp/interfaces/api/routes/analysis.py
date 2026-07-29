@@ -1,7 +1,7 @@
 """Analysis endpoints: run agent workflows through the orchestrator.
 
 POST (not GET) because a run has side effects and real cost: market data
-fetches and LLM calls.
+fetches, vendor calls and one LLM round-trip per agent.
 """
 
 from __future__ import annotations
@@ -9,9 +9,16 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from atp.application.orchestration import TradingOrchestrator
+from atp.application.orchestration import (
+    ANALYSIS_AGENTS,
+    TradingOrchestrator,
+    UnknownAgentError,
+)
 from atp.domain.models.analysis import TechnicalReport
+from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.news import NewsReport
+from atp.domain.models.sentiment import SentimentReport
 from atp.interfaces.api.schemas import AgentFailureSchema
 
 router = APIRouter(tags=["analysis"])
@@ -20,13 +27,26 @@ router = APIRouter(tags=["analysis"])
 class AnalysisRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=12, examples=["AAPL"])
     interval: BarInterval = BarInterval.DAY_1
+    agents: list[str] = Field(
+        default_factory=list,
+        description=f"Subset of {list(ANALYSIS_AGENTS)}; empty runs all of them",
+        examples=[["technical_analysis", "news_analysis"]],
+    )
 
 
 class AnalysisResponse(BaseModel):
+    """Reports are individually optional: an agent that fails is reported in
+    ``failures`` while the others still return their work."""
+
     symbol: str
     interval: BarInterval
+    requested_agents: list[str]
     completed_agents: list[str]
-    technical_report: TechnicalReport
+    failures: list[AgentFailureSchema] = Field(default_factory=list)
+    technical_report: TechnicalReport | None = None
+    fundamental_report: FundamentalReport | None = None
+    news_report: NewsReport | None = None
+    sentiment_report: SentimentReport | None = None
 
 
 def _orchestrator(request: Request) -> TradingOrchestrator:
@@ -36,10 +56,14 @@ def _orchestrator(request: Request) -> TradingOrchestrator:
 @router.post("/analysis", response_model=AnalysisResponse)
 async def run_analysis(request: AnalysisRequest, http_request: Request) -> AnalysisResponse:
     orchestrator = _orchestrator(http_request)
-    state = await orchestrator.run(request.symbol, request.interval)
+    try:
+        state = await orchestrator.run(request.symbol, request.interval, agents=request.agents)
+    except UnknownAgentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if state.technical_report is None:
-        failures = [AgentFailureSchema(agent=f.agent, error=f.error) for f in state.failures]
+    failures = [AgentFailureSchema(agent=f.agent, error=f.error) for f in state.failures]
+    if not state.has_report:
+        # Every selected agent failed - there is nothing to serve.
         raise HTTPException(
             status_code=502,
             detail={
@@ -50,6 +74,11 @@ async def run_analysis(request: AnalysisRequest, http_request: Request) -> Analy
     return AnalysisResponse(
         symbol=state.symbol,
         interval=state.interval,
+        requested_agents=list(state.requested_agents),
         completed_agents=state.completed,
+        failures=failures,
         technical_report=state.technical_report,
+        fundamental_report=state.fundamental_report,
+        news_report=state.news_report,
+        sentiment_report=state.sentiment_report,
     )

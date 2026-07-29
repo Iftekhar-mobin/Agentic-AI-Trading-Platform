@@ -2,8 +2,8 @@
 
 The state is the single source of truth for a workflow run: agents read from
 it and return partial updates; LangGraph merges those updates. List fields use
-the ``operator.add`` reducer so concurrent agents can append without
-overwriting each other once the graph fans out.
+the ``operator.add`` reducer so the analysis agents, which fan out
+concurrently, can append without overwriting each other.
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from typing import Annotated
 from pydantic import BaseModel, Field
 
 from atp.domain.models.analysis import TechnicalReport
+from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
+from atp.domain.models.news import NewsReport
+from atp.domain.models.sentiment import SentimentReport
 
 
 class AgentFailure(BaseModel):
@@ -28,10 +31,30 @@ class TradingState(BaseModel):
     # Request
     symbol: str
     interval: BarInterval = BarInterval.DAY_1
+    requested_agents: tuple[str, ...] = Field(
+        default=(),
+        description="Agents to dispatch; empty means every analysis agent",
+    )
 
     # Artifacts produced by agents (one field per agent family, grows per milestone)
     technical_report: TechnicalReport | None = None
+    fundamental_report: FundamentalReport | None = None
+    news_report: NewsReport | None = None
+    sentiment_report: SentimentReport | None = None
 
     # Bookkeeping
     completed: Annotated[list[str], operator.add] = Field(default_factory=list)
     failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
+
+    @property
+    def has_report(self) -> bool:
+        """True when at least one agent produced an artifact."""
+        return any(
+            report is not None
+            for report in (
+                self.technical_report,
+                self.fundamental_report,
+                self.news_report,
+                self.sentiment_report,
+            )
+        )

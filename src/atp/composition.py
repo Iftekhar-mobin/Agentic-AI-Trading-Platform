@@ -8,17 +8,27 @@ Everything downstream of here depends on ports, so swapping an adapter
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from atp.application.agents import TechnicalAnalysisAgent
+from atp.application.agents import (
+    FundamentalAnalysisAgent,
+    NewsAgent,
+    SentimentAgent,
+    TechnicalAnalysisAgent,
+)
 from atp.application.orchestration import TradingOrchestrator
 from atp.application.use_cases import (
+    AnalyzeFundamentals,
+    AnalyzeNews,
+    AnalyzeSentiment,
     AnalyzeTicker,
     CheckTradeRisk,
     ExecuteTrade,
     GetPortfolio,
     GetPriceHistory,
+    LoadNews,
     LoadPriceHistory,
     OptimizeStrategy,
     RunBacktest,
@@ -28,23 +38,29 @@ from atp.domain.ports import (
     BacktestEngine,
     BarRepository,
     Broker,
+    FundamentalsProvider,
     IndicatorEngine,
     LLMClient,
     MarketDataProvider,
+    NewsProvider,
     OrderRepository,
     PortfolioRepository,
+    SentimentModel,
     StrategyOptimizer,
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
 from atp.infrastructure.brokers import PaperBroker
-from atp.infrastructure.config import Settings, get_settings
+from atp.infrastructure.config import SentimentModelName, Settings, get_settings
+from atp.infrastructure.fundamentals import YFinanceFundamentalsProvider
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
 from atp.infrastructure.market_data import YFinanceMarketDataProvider
+from atp.infrastructure.news import YFinanceNewsProvider
 from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
 from atp.infrastructure.persistence.json_orders import JsonOrderRepository
 from atp.infrastructure.persistence.json_portfolio import JsonPortfolioRepository
+from atp.infrastructure.sentiment import FinBertSentimentModel, LexiconSentimentModel
 
 
 @dataclass(frozen=True)
@@ -56,12 +72,22 @@ class Container:
     indicator_engine: IndicatorEngine
     llm: LLMClient
     technical_analysis_agent: TechnicalAnalysisAgent
+    fundamentals_provider: FundamentalsProvider
+    fundamental_analysis_agent: FundamentalAnalysisAgent
+    news_provider: NewsProvider
+    sentiment_model: SentimentModel
+    news_agent: NewsAgent
+    sentiment_agent: SentimentAgent
     backtest_engine: BacktestEngine
     strategy_optimizer: StrategyOptimizer
     sync_market_data: SyncMarketData
     get_price_history: GetPriceHistory
     load_price_history: LoadPriceHistory
+    load_news: LoadNews
     analyze_ticker: AnalyzeTicker
+    analyze_fundamentals: AnalyzeFundamentals
+    analyze_news: AnalyzeNews
+    analyze_sentiment: AnalyzeSentiment
     run_backtest: RunBacktest
     optimize_strategy: OptimizeStrategy
     portfolio_repository: PortfolioRepository
@@ -83,6 +109,27 @@ class Container:
         technical_analysis_agent = TechnicalAnalysisAgent(llm, indicator_engine)
         load_price_history = LoadPriceHistory(bar_repository, market_data)
         analyze_ticker = AnalyzeTicker(load_price_history, technical_analysis_agent)
+
+        fundamentals_provider = YFinanceFundamentalsProvider()
+        fundamental_analysis_agent = FundamentalAnalysisAgent(llm)
+        news_provider = YFinanceNewsProvider()
+        sentiment_model = cls._build_sentiment_model(settings)
+        news_agent = NewsAgent(llm)
+        sentiment_agent = SentimentAgent(
+            llm, sentiment_model, half_life_days=settings.sentiment.half_life_days
+        )
+        load_news = LoadNews(
+            news_provider,
+            lookback_days=settings.news.lookback_days,
+            limit=settings.news.limit,
+            ttl=timedelta(seconds=settings.news.cache_ttl_seconds),
+        )
+        analyze_fundamentals = AnalyzeFundamentals(
+            fundamentals_provider, fundamental_analysis_agent
+        )
+        analyze_news = AnalyzeNews(load_news, news_agent)
+        analyze_sentiment = AnalyzeSentiment(load_news, sentiment_agent)
+
         backtest_engine = BacktestingPyEngine()
         strategy_optimizer = OptunaStrategyOptimizer(backtest_engine)
         portfolio_repository = JsonPortfolioRepository(
@@ -101,12 +148,22 @@ class Container:
             indicator_engine=indicator_engine,
             llm=llm,
             technical_analysis_agent=technical_analysis_agent,
+            fundamentals_provider=fundamentals_provider,
+            fundamental_analysis_agent=fundamental_analysis_agent,
+            news_provider=news_provider,
+            sentiment_model=sentiment_model,
+            news_agent=news_agent,
+            sentiment_agent=sentiment_agent,
             backtest_engine=backtest_engine,
             strategy_optimizer=strategy_optimizer,
             sync_market_data=SyncMarketData(market_data, bar_repository),
             get_price_history=GetPriceHistory(bar_repository),
             load_price_history=load_price_history,
+            load_news=load_news,
             analyze_ticker=analyze_ticker,
+            analyze_fundamentals=analyze_fundamentals,
+            analyze_news=analyze_news,
+            analyze_sentiment=analyze_sentiment,
             run_backtest=RunBacktest(load_price_history, backtest_engine),
             optimize_strategy=OptimizeStrategy(load_price_history, strategy_optimizer),
             portfolio_repository=portfolio_repository,
@@ -117,8 +174,18 @@ class Container:
             execute_trade=ExecuteTrade(
                 check_trade_risk, broker, portfolio_repository, order_repository
             ),
-            orchestrator=TradingOrchestrator(analyze_ticker),
+            orchestrator=TradingOrchestrator(
+                analyze_ticker, analyze_fundamentals, analyze_news, analyze_sentiment
+            ),
         )
+
+    @staticmethod
+    def _build_sentiment_model(settings: Settings) -> SentimentModel:
+        """Pick the sentiment classifier. FinBERT is lazy: selecting it here does
+        not import torch, so an unused adapter costs nothing at startup."""
+        if settings.sentiment.model is SentimentModelName.FINBERT:
+            return FinBertSentimentModel(settings.sentiment.finbert_model_name)
+        return LexiconSentimentModel()
 
     async def aclose(self) -> None:
         await self.engine.dispose()

@@ -1,71 +1,72 @@
-"""API tests: real app + real graph, with the analysis use case stubbed."""
+"""API tests: real app + real graph, with the analysis use cases stubbed."""
 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator
 from typing import cast
 
 import pytest
+from factories import (
+    make_fundamental_report,
+    make_news_report,
+    make_sentiment_report,
+    make_technical_report,
+)
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from atp.application.orchestration import TradingOrchestrator
-from atp.application.use_cases import AnalyzeTicker
-from atp.composition import Container
-from atp.domain.errors import InsufficientHistoryError
-from atp.domain.models.analysis import (
-    SignalDirection,
-    TechnicalAssessment,
-    TechnicalReport,
+from atp.application.use_cases import (
+    AnalyzeFundamentals,
+    AnalyzeNews,
+    AnalyzeSentiment,
+    AnalyzeTicker,
 )
-from atp.domain.models.explainability import Evidence
+from atp.composition import Container
+from atp.domain.errors import InsufficientDataError, InsufficientHistoryError
 from atp.domain.models.market import BarInterval
 from atp.infrastructure.config import Settings
 from atp.interfaces.api import create_app
 
 
-def make_report(symbol: str) -> TechnicalReport:
-    return TechnicalReport(
-        symbol=symbol,
-        interval=BarInterval.DAY_1,
-        as_of=datetime(2026, 7, 22, tzinfo=UTC),
-        latest_close=325.89,
-        readings=(),
-        signal_counts=dict.fromkeys(SignalDirection, 0),
-        assessment=TechnicalAssessment(
-            direction=SignalDirection.BULLISH,
-            reasoning="Trend indicators align.",
-            confidence=0.7,
-            evidence=(Evidence(source="sma_trend", statement="Above SMA(50)."),),
-            invalidation_conditions=("Close below SMA(50).",),
-        ),
-    )
-
-
-class StubAnalyzeTicker:
-    def __init__(self, *, error: Exception | None = None) -> None:
+class StubUseCase:
+    def __init__(
+        self,
+        report_factory: Callable[[str], BaseModel],
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self._report_factory = report_factory
         self._error = error
 
-    async def execute(
-        self, symbol: str, interval: BarInterval = BarInterval.DAY_1
-    ) -> TechnicalReport:
+    async def execute(self, symbol: str, interval: BarInterval = BarInterval.DAY_1) -> BaseModel:
         if self._error is not None:
             raise self._error
-        return make_report(symbol)
+        return self._report_factory(symbol)
 
 
-def make_client(stub: StubAnalyzeTicker) -> TestClient:
-    container = Container.build(Settings(_env_file=None))
-    container = dataclasses.replace(
-        container, orchestrator=TradingOrchestrator(cast(AnalyzeTicker, stub))
+def make_client(**errors: Exception) -> TestClient:
+    orchestrator = TradingOrchestrator(
+        cast(AnalyzeTicker, StubUseCase(make_technical_report, error=errors.get("technical"))),
+        cast(
+            AnalyzeFundamentals,
+            StubUseCase(make_fundamental_report, error=errors.get("fundamental")),
+        ),
+        cast(AnalyzeNews, StubUseCase(make_news_report, error=errors.get("news"))),
+        cast(
+            AnalyzeSentiment,
+            StubUseCase(make_sentiment_report, error=errors.get("sentiment")),
+        ),
     )
+    container = Container.build(Settings(_env_file=None))
+    container = dataclasses.replace(container, orchestrator=orchestrator)
     return TestClient(create_app(container))
 
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    with make_client(StubAnalyzeTicker()) as test_client:
+    with make_client() as test_client:
         yield test_client
 
 
@@ -82,23 +83,72 @@ def test_analysis_success(client: TestClient) -> None:
     body = response.json()
     assert body["symbol"] == "AAPL"
     assert body["interval"] == "1d"
-    assert body["completed_agents"] == ["technical_analysis"]
+    assert sorted(body["completed_agents"]) == [
+        "fundamental_analysis",
+        "news_analysis",
+        "sentiment_analysis",
+        "technical_analysis",
+    ]
+    assert body["failures"] == []
     assessment = body["technical_report"]["assessment"]
     assert assessment["direction"] == "bullish"
     assert assessment["confidence"] == 0.7
     assert assessment["evidence"]
     assert assessment["invalidation_conditions"]
+    assert body["fundamental_report"]["assessment"]["direction"] == "neutral"
+    assert body["news_report"]["assessment"]["key_themes"] == ["product cycle"]
+    assert body["sentiment_report"]["summary"]["weighted_polarity"] == 0.8
+    assert body["sentiment_report"]["model_name"] == "lexicon-v1"
 
 
-def test_analysis_failure_returns_502_with_failures() -> None:
-    stub = StubAnalyzeTicker(error=InsufficientHistoryError("only 3 bars"))
-    with make_client(stub) as client:
+def test_agent_selection_is_honoured(client: TestClient) -> None:
+    response = client.post("/analysis", json={"symbol": "AAPL", "agents": ["news_analysis"]})
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["requested_agents"] == ["news_analysis"]
+    assert body["completed_agents"] == ["news_analysis"]
+    assert body["news_report"] is not None
+    assert body["technical_report"] is None
+
+
+def test_unknown_agent_returns_422(client: TestClient) -> None:
+    response = client.post("/analysis", json={"symbol": "AAPL", "agents": ["astrology"]})
+    assert response.status_code == 422
+    assert "astrology" in response.json()["detail"]
+
+
+def test_partial_failure_still_returns_the_other_reports() -> None:
+    with make_client(technical=InsufficientHistoryError("only 3 bars")) as client:
+        response = client.post("/analysis", json={"symbol": "AAPL"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["technical_report"] is None
+    assert body["news_report"] is not None
+    assert body["failures"][0]["agent"] == "technical_analysis"
+    assert "3 bars" in body["failures"][0]["error"]
+
+
+def test_total_failure_returns_502_with_failures() -> None:
+    errors = {
+        "technical": InsufficientHistoryError("only 3 bars"),
+        "fundamental": InsufficientDataError("no metrics"),
+        "news": InsufficientDataError("no articles"),
+        "sentiment": InsufficientDataError("no articles"),
+    }
+    with make_client(**errors) as client:
         response = client.post("/analysis", json={"symbol": "AAPL"})
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert detail["failures"][0]["agent"] == "technical_analysis"
-    assert "3 bars" in detail["failures"][0]["error"]
+    agents = {failure["agent"] for failure in detail["failures"]}
+    assert agents == {
+        "technical_analysis",
+        "fundamental_analysis",
+        "news_analysis",
+        "sentiment_analysis",
+    }
 
 
 def test_analysis_validates_input(client: TestClient) -> None:

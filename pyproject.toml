@@ -18,6 +18,20 @@ dependencies = [
     "uvicorn>=0.30",
     "backtesting>=0.6.6",
     "optuna>=4.9.0",
+    "qdrant-client>=1.18.0",
+    "streamlit>=1.60.0",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+]
+
+[project.optional-dependencies]
+# Real FinBERT inference. Kept optional because torch adds gigabytes to an
+# image most deployments do not need, and CI must run offline.
+finbert = [
+    "transformers>=4.44",
+    "torch>=2.3",
 ]
 
 [project.scripts]
@@ -70,7 +84,15 @@ files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["yfinance", "yfinance.*", "backtesting", "backtesting.*"]
+module = [
+    "yfinance",
+    "yfinance.*",
+    "backtesting",
+    "backtesting.*",
+    # Optional 'finbert' extra: absent in the default environment and in CI.
+    "transformers",
+    "transformers.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

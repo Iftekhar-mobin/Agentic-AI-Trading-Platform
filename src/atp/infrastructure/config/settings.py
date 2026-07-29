@@ -58,6 +58,39 @@ class LLMSettings(BaseModel):
     anthropic_api_key: SecretStr | None = None
 
 
+class SentimentModelName(StrEnum):
+    LEXICON = "lexicon"
+    FINBERT = "finbert"
+
+
+class NewsSettings(BaseModel):
+    """News retrieval settings (env: ``ATP_NEWS__*``).
+
+    ``cache_ttl_seconds`` collapses the duplicate fetch the news and sentiment
+    agents would otherwise make in the same fan-out; set it to 0 to disable.
+    """
+
+    lookback_days: int = Field(default=7, ge=1, le=90)
+    limit: int = Field(default=20, ge=1, le=100)
+    cache_ttl_seconds: int = Field(default=300, ge=0)
+
+
+class SentimentSettings(BaseModel):
+    """Sentiment classifier settings (env: ``ATP_SENTIMENT__*``).
+
+    ``finbert`` needs the optional dependency group: ``uv sync --extra finbert``.
+    """
+
+    model: SentimentModelName = SentimentModelName.LEXICON
+    finbert_model_name: str = "ProsusAI/finbert"
+    half_life_days: float = Field(
+        default=3.0,
+        gt=0,
+        le=90,
+        description="Age at which an article's sentiment carries half weight",
+    )
+
+
 class ExecutionSettings(BaseModel):
     """Execution settings (env: ``ATP_EXECUTION__*``)."""
 
@@ -99,6 +132,8 @@ class Settings(BaseSettings):
     # risk engine; nothing downstream can loosen them at runtime.
     risk: RiskLimits = Field(default_factory=RiskLimits)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    news: NewsSettings = Field(default_factory=NewsSettings)
+    sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

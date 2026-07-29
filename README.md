@@ -21,7 +21,8 @@ docker compose up -d       # start TimescaleDB + Redis
 uv run atp status          # smoke command: prints configuration wiring
 uv run atp sync AAPL       # pull daily bars into TimescaleDB
 uv run atp bars AAPL -n 5  # show the 5 most recent stored bars
-uv run atp analyze AAPL    # run the analysis workflow (needs an Anthropic key)
+uv run atp analyze AAPL    # run all analysis agents in parallel (needs an Anthropic key)
+uv run atp analyze AAPL -a technical_analysis,news_analysis   # run a subset
 uv run atp backtest AAPL -s ema_cross   # backtest a strategy preset
 uv run atp serve           # start the HTTP API on http://127.0.0.1:8000
 uv run pytest              # run the test suite
@@ -49,6 +50,27 @@ Integration tests skip automatically when the database is not running.
 | `docker compose up -d` | start TimescaleDB + Redis |
 
 CI (GitHub Actions) runs format check, lint, mypy, and tests on every push/PR.
+
+## Analysis agents
+
+`atp analyze` (and `POST /analysis`) dispatches four specialists concurrently
+through the supervisor graph:
+
+| Agent | Deterministic layer | LLM layer |
+|-------|---------------------|-----------|
+| `technical_analysis` | indicator engine + rule classification | interprets the readings |
+| `fundamental_analysis` | threshold rules over a fundamentals snapshot | interprets, sector-adjusts |
+| `news_analysis` | — (article retrieval only) | themes, catalysts, materiality |
+| `sentiment_analysis` | FinBERT/lexicon scores + recency-weighted aggregate | interprets the aggregate |
+
+An agent that fails is reported in `failures`; the others still return their work.
+
+Sentiment defaults to a transparent offline lexicon classifier. For real FinBERT:
+
+```bash
+uv sync --extra finbert
+ATP_SENTIMENT__MODEL=finbert uv run atp analyze AAPL -a sentiment_analysis
+```
 
 ## Safety defaults
 

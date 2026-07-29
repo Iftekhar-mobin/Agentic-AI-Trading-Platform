@@ -13,6 +13,7 @@ from collections import Counter
 
 import structlog
 
+from atp.application.agents.evidence import warn_on_unknown_sources
 from atp.domain.errors import InsufficientHistoryError
 from atp.domain.models.analysis import (
     SignalDirection,
@@ -24,6 +25,8 @@ from atp.domain.ports.indicators import IndicatorEngine
 from atp.domain.ports.llm import LLMClient
 
 log = structlog.get_logger()
+
+AGENT_NAME = "technical_analysis"
 
 SYSTEM_PROMPT = """\
 You are the Technical Analysis Agent of an AI trading platform. Traders use \
@@ -75,15 +78,12 @@ class TechnicalAnalysisAgent:
             prompt=json.dumps(payload, sort_keys=True),
         )
 
-        known_sources = {reading.name for reading in readings}
-        unknown = [e.source for e in assessment.evidence if e.source not in known_sources]
-        if unknown:
-            log.warning(
-                "technical_analysis.unknown_evidence_sources",
-                symbol=history.symbol,
-                sources=unknown,
-            )
-
+        warn_on_unknown_sources(
+            AGENT_NAME,
+            history.symbol,
+            assessment.evidence,
+            {reading.name for reading in readings},
+        )
         log.info(
             "technical_analysis.completed",
             symbol=history.symbol,

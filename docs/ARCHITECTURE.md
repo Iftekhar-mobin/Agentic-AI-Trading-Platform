@@ -58,8 +58,8 @@ Every agent obeys one contract:
 
 ```
 Supervisor (StateGraph router)
-  ├── analysis pool      : market_research, technical, fundamental,
-  │                        news, sentiment, chart_pattern
+  ├── analysis pool      : technical, fundamental, news, sentiment
+  │                        (dispatched concurrently in one superstep)
   ├── strategy pool      : strategy_generation → backtesting → optimization
   ├── decision pool      : risk_management (veto power) → portfolio
   ├── execution          : trade_execution (paper first, gated live)
@@ -155,6 +155,17 @@ Each milestone ends with working, tested, demoable software.
   vectorbt/custom engine can replace it for portfolio-level simulation later.
 - **yfinance for dev only** — unreliable/unofficial; fine behind the provider port
   for development, replaced by Polygon/Alpaca keys in production settings.
+- **FinBERT optional, lexicon default** — the sentiment classifier sits behind a
+  `SentimentModel` port. FinBERT (`transformers` + `torch`) is the production
+  path but an optional extra: it adds gigabytes to an image most deployments do
+  not need, and the suite must run offline. The default adapter is a real
+  Loughran-McDonald-style lexicon classifier — blunt, but deterministic and
+  explainable — so the sentiment pipeline is meaningfully testable without it.
+- **Analysis agents fan out** — technical, fundamental, news and sentiment are
+  independent (none reads another's output), so the supervisor dispatches them
+  in one superstep. That is four LLM round-trips of latency collapsed into one.
+  A shared, locked TTL cache in `LoadNews` stops the news and sentiment agents
+  double-fetching the same articles from a rate-limited vendor.
 - **Paper trading is the default** — live execution requires an explicit config flag,
   a separate credential set, and passes through the same risk gate.
 
