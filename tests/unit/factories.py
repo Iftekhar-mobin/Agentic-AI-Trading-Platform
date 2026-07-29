@@ -12,6 +12,7 @@ from atp.domain.models.analysis import (
     SignalDirection,
     TechnicalAssessment,
     TechnicalReport,
+    TimeframeReadings,
 )
 from atp.domain.models.explainability import Evidence
 from atp.domain.models.fundamentals import (
@@ -31,6 +32,18 @@ from atp.domain.models.memory import (
     RegimeVolatility,
 )
 from atp.domain.models.news import NewsArticle, NewsAssessment, NewsReport
+from atp.domain.models.patterns import (
+    ChartPattern,
+    ChartPatternReport,
+    PatternAssessment,
+    PatternKind,
+    TimeframePatterns,
+)
+from atp.domain.models.research import (
+    MarketContextReading,
+    MarketResearchAssessment,
+    MarketResearchReport,
+)
 from atp.domain.models.sentiment import (
     ScoredArticle,
     SentimentAssessment,
@@ -43,20 +56,104 @@ from atp.domain.models.sentiment import (
 AS_OF = datetime(2026, 7, 22, tzinfo=UTC)
 
 
-def make_technical_report(symbol: str = "AAPL") -> TechnicalReport:
-    return TechnicalReport(
-        symbol=symbol,
-        interval=BarInterval.DAY_1,
+def make_timeframe_readings(
+    interval: BarInterval = BarInterval.DAY_1,
+    direction: SignalDirection = SignalDirection.BULLISH,
+) -> TimeframeReadings:
+    return TimeframeReadings(
+        interval=interval,
         as_of=AS_OF,
         latest_close=325.89,
+        bars=200,
         readings=(),
         signal_counts=dict.fromkeys(SignalDirection, 0),
+        direction=direction,
+    )
+
+
+def make_technical_report(
+    symbol: str = "AAPL",
+    intervals: tuple[BarInterval, ...] = (BarInterval.DAY_1,),
+) -> TechnicalReport:
+    return TechnicalReport(
+        symbol=symbol,
+        timeframes=tuple(make_timeframe_readings(interval) for interval in intervals),
         assessment=TechnicalAssessment(
             direction=SignalDirection.BULLISH,
             reasoning="Trend indicators align.",
             confidence=0.7,
-            evidence=(Evidence(source="sma_trend", statement="Above SMA(50)."),),
+            evidence=(Evidence(source="1d:sma_trend", statement="Above SMA(50)."),),
             invalidation_conditions=("Close below SMA(50).",),
+            timeframe_alignment="All requested timeframes point the same way.",
+        ),
+    )
+
+
+def make_chart_pattern_report(
+    symbol: str = "AAPL",
+    intervals: tuple[BarInterval, ...] = (BarInterval.DAY_1,),
+) -> ChartPatternReport:
+    pattern = ChartPattern(
+        kind=PatternKind.DOUBLE_BOTTOM,
+        direction=SignalDirection.BULLISH,
+        start=AS_OF - timedelta(days=30),
+        end=AS_OF,
+        levels={"trough_1": 300.0, "trough_2": 302.0, "neckline": 320.0},
+        confirmed=True,
+        quality=0.8,
+        summary="Double bottom at 300.00/302.00 with a neckline at 320.00 - confirmed",
+    )
+    return ChartPatternReport(
+        symbol=symbol,
+        timeframes=tuple(
+            TimeframePatterns(
+                interval=interval,
+                as_of=AS_OF,
+                latest_close=325.89,
+                bars=200,
+                swings=(),
+                levels=(),
+                patterns=(pattern,),
+                signal_counts=dict.fromkeys(SignalDirection, 0),
+                direction=SignalDirection.BULLISH,
+            )
+            for interval in intervals
+        ),
+        assessment=PatternAssessment(
+            direction=SignalDirection.BULLISH,
+            reasoning="A confirmed double bottom on the highest timeframe.",
+            confidence=0.6,
+            evidence=(Evidence(source="1d:double_bottom", statement="Neckline broken at 320.00."),),
+            invalidation_conditions=("A close back below 302.00.",),
+            timeframe_alignment="Timeframes agree.",
+        ),
+    )
+
+
+def make_market_research_report(symbol: str = "AAPL") -> MarketResearchReport:
+    return MarketResearchReport(
+        symbol=symbol,
+        benchmark="SPY",
+        interval=BarInterval.DAY_1,
+        as_of=AS_OF,
+        overlapping_bars=252,
+        readings=(
+            MarketContextReading(
+                name="relative_strength_3m",
+                values={"spread_pct": 6.2},
+                direction=SignalDirection.BULLISH,
+                summary="Outperforming the benchmark by 6.2pp over 63 bars.",
+            ),
+        ),
+        signal_counts=dict.fromkeys(SignalDirection, 0),
+        assessment=MarketResearchAssessment(
+            direction=SignalDirection.BULLISH,
+            reasoning="Leading a rising market.",
+            confidence=0.65,
+            evidence=(
+                Evidence(source="relative_strength_3m", statement="Outperforming by 6.2pp."),
+            ),
+            invalidation_conditions=("Relative strength turning negative over 1m.",),
         ),
     )
 

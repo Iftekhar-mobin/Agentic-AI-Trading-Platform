@@ -3,8 +3,10 @@
 Topology — two phases, because the second one reads the first one's output:
 
                     ┌─> technical_analysis   ─┐
-                    ├─> fundamental_analysis ─┤
-    START -> supervisor -> news_analysis     ─┼─> supervisor
+                    ├─> chart_pattern        ─┤
+                    ├─> market_research      ─┤
+    START -> supervisor -> fundamental_analysis ─┼─> supervisor
+                    ├─> news_analysis        ─┤        │
                     └─> sentiment_analysis   ─┘        │
                                                        ├─> continuous_learning
                                                        │        │
@@ -42,18 +44,22 @@ from pydantic import BaseModel
 
 from atp.application.orchestration.situation import render_situation
 from atp.application.orchestration.state import AgentFailure, TradingState
+from atp.application.use_cases.analyze_chart_patterns import AnalyzeChartPatterns
 from atp.application.use_cases.analyze_fundamentals import AnalyzeFundamentals
+from atp.application.use_cases.analyze_market_research import AnalyzeMarketResearch
 from atp.application.use_cases.analyze_news import AnalyzeNews
 from atp.application.use_cases.analyze_sentiment import AnalyzeSentiment
 from atp.application.use_cases.analyze_ticker import AnalyzeTicker
 from atp.application.use_cases.learn_from_context import LearnFromContext
 from atp.domain.errors import DomainError
-from atp.domain.models.market import BarInterval
+from atp.domain.models.market import BarInterval, sort_timeframes
 
 log = structlog.get_logger()
 
 SUPERVISOR = "supervisor"
 TECHNICAL_ANALYSIS = "technical_analysis"
+CHART_PATTERN = "chart_pattern"
+MARKET_RESEARCH = "market_research"
 FUNDAMENTAL_ANALYSIS = "fundamental_analysis"
 NEWS_ANALYSIS = "news_analysis"
 SENTIMENT_ANALYSIS = "sentiment_analysis"
@@ -61,6 +67,8 @@ CONTINUOUS_LEARNING = "continuous_learning"
 
 ANALYSIS_AGENTS: tuple[str, ...] = (
     TECHNICAL_ANALYSIS,
+    CHART_PATTERN,
+    MARKET_RESEARCH,
     FUNDAMENTAL_ANALYSIS,
     NEWS_ANALYSIS,
     SENTIMENT_ANALYSIS,
@@ -75,6 +83,8 @@ ALL_AGENTS: tuple[str, ...] = ANALYSIS_AGENTS + FEEDBACK_AGENTS
 
 _ARTIFACT_FIELDS: dict[str, str] = {
     TECHNICAL_ANALYSIS: "technical_report",
+    CHART_PATTERN: "chart_pattern_report",
+    MARKET_RESEARCH: "market_research_report",
     FUNDAMENTAL_ANALYSIS: "fundamental_report",
     NEWS_ANALYSIS: "news_report",
     SENTIMENT_ANALYSIS: "sentiment_report",
@@ -105,12 +115,16 @@ class TradingOrchestrator:
     def __init__(
         self,
         analyze_ticker: AnalyzeTicker,
+        analyze_chart_patterns: AnalyzeChartPatterns,
+        analyze_market_research: AnalyzeMarketResearch,
         analyze_fundamentals: AnalyzeFundamentals,
         analyze_news: AnalyzeNews,
         analyze_sentiment: AnalyzeSentiment,
         learn_from_context: LearnFromContext,
     ) -> None:
         self._analyze_ticker = analyze_ticker
+        self._analyze_chart_patterns = analyze_chart_patterns
+        self._analyze_market_research = analyze_market_research
         self._analyze_fundamentals = analyze_fundamentals
         self._analyze_news = analyze_news
         self._analyze_sentiment = analyze_sentiment
@@ -120,19 +134,22 @@ class TradingOrchestrator:
     async def run(
         self,
         symbol: str,
-        interval: BarInterval = BarInterval.DAY_1,
+        intervals: Sequence[BarInterval] | BarInterval = BarInterval.DAY_1,
         *,
         agents: Sequence[str] | None = None,
     ) -> TradingState:
+        """Run the graph. ``intervals`` accepts one timeframe or several (MTF)."""
+        requested = [intervals] if isinstance(intervals, BarInterval) else list(intervals)
+        ordered = sort_timeframes(requested) or (BarInterval.DAY_1,)
         initial = TradingState(
             symbol=symbol.strip().upper(),
-            interval=interval,
+            intervals=ordered,
             requested_agents=resolve_agents(agents),
         )
         log.info(
             "orchestrator.run_started",
             symbol=initial.symbol,
-            interval=interval.value,
+            intervals=[interval.value for interval in ordered],
             agents=list(initial.requested_agents),
         )
         result = await self._graph.ainvoke(initial)
@@ -149,6 +166,8 @@ class TradingOrchestrator:
         graph: StateGraph[TradingState, Any, Any, Any] = StateGraph(TradingState)
         graph.add_node(SUPERVISOR, self._supervisor)
         graph.add_node(TECHNICAL_ANALYSIS, self._technical_analysis)
+        graph.add_node(CHART_PATTERN, self._chart_pattern)
+        graph.add_node(MARKET_RESEARCH, self._market_research)
         graph.add_node(FUNDAMENTAL_ANALYSIS, self._fundamental_analysis)
         graph.add_node(NEWS_ANALYSIS, self._news_analysis)
         graph.add_node(SENTIMENT_ANALYSIS, self._sentiment_analysis)
@@ -205,7 +224,23 @@ class TradingOrchestrator:
         return await self._dispatch(
             TECHNICAL_ANALYSIS,
             state,
-            lambda: self._analyze_ticker.execute(state.symbol, state.interval),
+            lambda: self._analyze_ticker.execute(state.symbol, state.intervals),
+        )
+
+    async def _chart_pattern(self, state: TradingState) -> dict[str, Any]:
+        return await self._dispatch(
+            CHART_PATTERN,
+            state,
+            lambda: self._analyze_chart_patterns.execute(state.symbol, state.intervals),
+        )
+
+    async def _market_research(self, state: TradingState) -> dict[str, Any]:
+        # Benchmark comparison is computed on the primary timeframe only:
+        # relative strength across mismatched bar sizes is meaningless.
+        return await self._dispatch(
+            MARKET_RESEARCH,
+            state,
+            lambda: self._analyze_market_research.execute(state.symbol, state.interval),
         )
 
     async def _fundamental_analysis(self, state: TradingState) -> dict[str, Any]:

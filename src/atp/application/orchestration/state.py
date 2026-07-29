@@ -18,6 +18,8 @@ from atp.domain.models.fundamentals import FundamentalReport
 from atp.domain.models.market import BarInterval
 from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
+from atp.domain.models.patterns import ChartPatternReport
+from atp.domain.models.research import MarketResearchReport
 from atp.domain.models.sentiment import SentimentReport
 
 
@@ -31,7 +33,11 @@ class AgentFailure(BaseModel):
 class TradingState(BaseModel):
     # Request
     symbol: str
-    interval: BarInterval = BarInterval.DAY_1
+    intervals: tuple[BarInterval, ...] = Field(
+        default=(BarInterval.DAY_1,),
+        min_length=1,
+        description="Timeframes to analyze, highest first (multi-timeframe analysis)",
+    )
     requested_agents: tuple[str, ...] = Field(
         default=(),
         description="Agents to dispatch; empty means every analysis agent",
@@ -39,6 +45,8 @@ class TradingState(BaseModel):
 
     # Artifacts produced by agents (one field per agent family, grows per milestone)
     technical_report: TechnicalReport | None = None
+    chart_pattern_report: ChartPatternReport | None = None
+    market_research_report: MarketResearchReport | None = None
     fundamental_report: FundamentalReport | None = None
     news_report: NewsReport | None = None
     sentiment_report: SentimentReport | None = None
@@ -51,6 +59,11 @@ class TradingState(BaseModel):
     failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
 
     @property
+    def interval(self) -> BarInterval:
+        """The primary (highest) timeframe — what single-timeframe callers mean."""
+        return self.intervals[0]
+
+    @property
     def has_analysis(self) -> bool:
         """True when at least one analysis agent produced an artifact.
 
@@ -60,6 +73,8 @@ class TradingState(BaseModel):
             report is not None
             for report in (
                 self.technical_report,
+                self.chart_pattern_report,
+                self.market_research_report,
                 self.fundamental_report,
                 self.news_report,
                 self.sentiment_report,

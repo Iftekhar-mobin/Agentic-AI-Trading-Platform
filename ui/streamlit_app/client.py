@@ -56,9 +56,16 @@ class AtpClient:
         return dict(self._request("GET", "/health"))
 
     def analyze(
-        self, symbol: str, interval: str = "1d", agents: list[str] | None = None
+        self,
+        symbol: str,
+        intervals: list[str] | None = None,
+        agents: list[str] | None = None,
     ) -> dict[str, Any]:
-        payload = {"symbol": symbol, "interval": interval, "agents": agents or []}
+        payload = {
+            "symbol": symbol,
+            "intervals": intervals or ["1d"],
+            "agents": agents or [],
+        }
         return dict(self._request("POST", "/analysis", json=payload, timeout=ANALYSIS_TIMEOUT))
 
     def portfolio(self) -> dict[str, Any]:

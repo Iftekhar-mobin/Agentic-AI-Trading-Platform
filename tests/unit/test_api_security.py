@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import cast
 
 import pytest
 from factories import (
+    make_chart_pattern_report,
     make_fundamental_report,
     make_learning_report,
+    make_market_research_report,
     make_news_report,
     make_sentiment_report,
     make_technical_report,
@@ -19,7 +21,9 @@ from pydantic import BaseModel, SecretStr
 
 from atp.application.orchestration import TradingOrchestrator
 from atp.application.use_cases import (
+    AnalyzeChartPatterns,
     AnalyzeFundamentals,
+    AnalyzeMarketResearch,
     AnalyzeNews,
     AnalyzeSentiment,
     AnalyzeTicker,
@@ -40,7 +44,10 @@ class StubUseCase:
         self._factory = factory
 
     async def execute(
-        self, symbol: str, interval: BarInterval = BarInterval.DAY_1, **kwargs: object
+        self,
+        symbol: str,
+        intervals: Sequence[BarInterval] | BarInterval = BarInterval.DAY_1,
+        **kwargs: object,
     ) -> BaseModel:
         return self._factory(symbol)  # type: ignore[no-any-return]
 
@@ -62,6 +69,8 @@ def secured_settings(**overrides: object) -> Settings:
 def make_client(settings: Settings) -> TestClient:
     orchestrator = TradingOrchestrator(
         cast(AnalyzeTicker, StubUseCase(make_technical_report)),
+        cast(AnalyzeChartPatterns, StubUseCase(make_chart_pattern_report)),
+        cast(AnalyzeMarketResearch, StubUseCase(make_market_research_report)),
         cast(AnalyzeFundamentals, StubUseCase(make_fundamental_report)),
         cast(AnalyzeNews, StubUseCase(make_news_report)),
         cast(AnalyzeSentiment, StubUseCase(make_sentiment_report)),

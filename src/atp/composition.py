@@ -13,15 +13,19 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from atp.application.agents import (
+    ChartPatternAgent,
     ContinuousLearningAgent,
     FundamentalAnalysisAgent,
+    MarketResearchAgent,
     NewsAgent,
     SentimentAgent,
     TechnicalAnalysisAgent,
 )
 from atp.application.orchestration import TradingOrchestrator
 from atp.application.use_cases import (
+    AnalyzeChartPatterns,
     AnalyzeFundamentals,
+    AnalyzeMarketResearch,
     AnalyzeNews,
     AnalyzeSentiment,
     AnalyzeTicker,
@@ -33,6 +37,7 @@ from atp.application.use_cases import (
     LearnFromContext,
     LoadNews,
     LoadPriceHistory,
+    LoadTimeframes,
     OptimizeStrategy,
     RunBacktest,
     SyncMarketData,
@@ -65,7 +70,10 @@ from atp.infrastructure.embeddings import HashingEmbeddingModel
 from atp.infrastructure.fundamentals import YFinanceFundamentalsProvider
 from atp.infrastructure.indicators import PandasIndicatorEngine
 from atp.infrastructure.llm import AnthropicLLMClient
-from atp.infrastructure.market_data import YFinanceMarketDataProvider
+from atp.infrastructure.market_data import (
+    ResamplingMarketDataProvider,
+    YFinanceMarketDataProvider,
+)
 from atp.infrastructure.memory import JsonEpisodicMemory, QdrantEpisodicMemory
 from atp.infrastructure.news import YFinanceNewsProvider
 from atp.infrastructure.optimization import OptunaStrategyOptimizer
@@ -84,6 +92,8 @@ class Container:
     indicator_engine: IndicatorEngine
     llm: LLMClient
     technical_analysis_agent: TechnicalAnalysisAgent
+    chart_pattern_agent: ChartPatternAgent
+    market_research_agent: MarketResearchAgent
     fundamentals_provider: FundamentalsProvider
     fundamental_analysis_agent: FundamentalAnalysisAgent
     news_provider: NewsProvider
@@ -98,8 +108,11 @@ class Container:
     sync_market_data: SyncMarketData
     get_price_history: GetPriceHistory
     load_price_history: LoadPriceHistory
+    load_timeframes: LoadTimeframes
     load_news: LoadNews
     analyze_ticker: AnalyzeTicker
+    analyze_chart_patterns: AnalyzeChartPatterns
+    analyze_market_research: AnalyzeMarketResearch
     analyze_fundamentals: AnalyzeFundamentals
     analyze_news: AnalyzeNews
     analyze_sentiment: AnalyzeSentiment
@@ -120,12 +133,22 @@ class Container:
         settings = settings or get_settings()
         engine = create_engine(settings.database.dsn)
         bar_repository = TimescaleBarRepository(engine)
-        market_data = YFinanceMarketDataProvider()
+        # Wrapped so intervals the vendor does not serve (4H) are aggregated
+        # from ones it does. Any provider swapped in here inherits that.
+        market_data = ResamplingMarketDataProvider(YFinanceMarketDataProvider())
         indicator_engine = PandasIndicatorEngine()
         llm = AnthropicLLMClient(settings.llm)
         technical_analysis_agent = TechnicalAnalysisAgent(llm, indicator_engine)
         load_price_history = LoadPriceHistory(bar_repository, market_data)
-        analyze_ticker = AnalyzeTicker(load_price_history, technical_analysis_agent)
+        load_timeframes = LoadTimeframes(load_price_history)
+        analyze_ticker = AnalyzeTicker(load_timeframes, technical_analysis_agent)
+
+        chart_pattern_agent = ChartPatternAgent(llm)
+        market_research_agent = MarketResearchAgent(llm)
+        analyze_chart_patterns = AnalyzeChartPatterns(load_timeframes, chart_pattern_agent)
+        analyze_market_research = AnalyzeMarketResearch(
+            load_price_history, market_research_agent, benchmark=settings.research.benchmark
+        )
 
         fundamentals_provider = YFinanceFundamentalsProvider()
         fundamental_analysis_agent = FundamentalAnalysisAgent(llm)
@@ -175,6 +198,8 @@ class Container:
             indicator_engine=indicator_engine,
             llm=llm,
             technical_analysis_agent=technical_analysis_agent,
+            chart_pattern_agent=chart_pattern_agent,
+            market_research_agent=market_research_agent,
             fundamentals_provider=fundamentals_provider,
             fundamental_analysis_agent=fundamental_analysis_agent,
             news_provider=news_provider,
@@ -186,8 +211,11 @@ class Container:
             sync_market_data=SyncMarketData(market_data, bar_repository),
             get_price_history=GetPriceHistory(bar_repository),
             load_price_history=load_price_history,
+            load_timeframes=load_timeframes,
             load_news=load_news,
             analyze_ticker=analyze_ticker,
+            analyze_chart_patterns=analyze_chart_patterns,
+            analyze_market_research=analyze_market_research,
             analyze_fundamentals=analyze_fundamentals,
             analyze_news=analyze_news,
             analyze_sentiment=analyze_sentiment,
@@ -208,6 +236,8 @@ class Container:
             ),
             orchestrator=TradingOrchestrator(
                 analyze_ticker,
+                analyze_chart_patterns,
+                analyze_market_research,
                 analyze_fundamentals,
                 analyze_news,
                 analyze_sentiment,

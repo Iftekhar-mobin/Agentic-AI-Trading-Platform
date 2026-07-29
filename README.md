@@ -21,8 +21,9 @@ docker compose up -d       # start TimescaleDB + Redis + Qdrant
 uv run atp status          # smoke command: prints configuration wiring
 uv run atp sync AAPL       # pull daily bars into TimescaleDB
 uv run atp bars AAPL -n 5  # show the 5 most recent stored bars
-uv run atp analyze AAPL    # run all analysis agents in parallel (needs an Anthropic key)
-uv run atp analyze AAPL -a technical_analysis,news_analysis   # run a subset
+uv run atp analyze AAPL              # all agents, daily timeframe
+uv run atp analyze AAPL -t 1d,4h,1h  # multi-timeframe analysis
+uv run atp analyze AAPL -a technical_analysis,chart_pattern   # run a subset
 uv run atp backtest AAPL -s ema_cross   # backtest a strategy preset
 uv run atp serve           # start the HTTP API on http://127.0.0.1:8000
 uv run streamlit run ui/streamlit_app/app.py   # dashboard (needs the API running)
@@ -58,15 +59,32 @@ CI (GitHub Actions) runs format check, lint, mypy, and tests on every push/PR.
 
 | Agent | Deterministic layer | LLM layer |
 |-------|---------------------|-----------|
-| `technical_analysis` | indicator engine + rule classification | interprets the readings |
+| `technical_analysis` | indicator engine + rule classification, per timeframe | interprets across timeframes |
+| `chart_pattern` | swing/level/formation detection, per timeframe | judges which shapes matter |
+| `market_research` | relative strength, beta, correlation vs a benchmark | leading or lagging the market |
 | `fundamental_analysis` | threshold rules over a fundamentals snapshot | interprets, sector-adjusts |
 | `news_analysis` | — (article retrieval only) | themes, catalysts, materiality |
 | `sentiment_analysis` | FinBERT/lexicon scores + recency-weighted aggregate | interprets the aggregate |
 | `continuous_learning` | regime tagging + semantic recall from the journal | compares now to precedent |
 
-The first four run concurrently; `continuous_learning` runs after them, because it
+The first six run concurrently; `continuous_learning` runs after them, because it
 reflects on what they concluded. An agent that fails is reported in `failures`; the
 others still return their work.
+
+### Multi-timeframe analysis
+
+Pass several timeframes and the technical and chart-pattern agents reason about all
+of them at once — the highest sets the context, and a lower-timeframe signal that
+fights it is called out as counter-trend rather than reported as agreement:
+
+```bash
+uv run atp analyze AAPL -t 1d,4h,1h
+curl -X POST localhost:8000/analysis -d '{"symbol":"AAPL","intervals":["1d","4h","1h"]}'
+```
+
+Timeframes are always read highest-first regardless of the order given. **4H has no
+native vendor feed** — it is aggregated from 1H bars on fixed UTC boundaries, which
+means its candles do not align to any particular exchange session.
 
 Sentiment defaults to a transparent offline lexicon classifier. For real FinBERT:
 

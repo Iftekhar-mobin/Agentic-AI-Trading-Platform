@@ -25,11 +25,17 @@ from client import DEFAULT_BASE_URL, ApiError, AtpClient
 
 AGENTS = [
     "technical_analysis",
+    "chart_pattern",
+    "market_research",
     "fundamental_analysis",
     "news_analysis",
     "sentiment_analysis",
     "continuous_learning",
 ]
+
+# Highest to lowest — the order multi-timeframe analysis is read in.
+TIMEFRAMES = ["1wk", "1d", "4h", "1h", "15m", "5m", "1m"]
+DEFAULT_TIMEFRAMES = ["1d", "4h", "1h"]
 
 DIRECTION_ICON = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}
 
@@ -68,6 +74,14 @@ def render_explanation(explanation: dict[str, Any]) -> None:
         st.markdown(f"- {condition}")
 
 
+def render_timeframe_directions(timeframes: list[dict[str, Any]]) -> None:
+    """One tile per timeframe, highest first — the MTF view at a glance."""
+    columns = st.columns(len(timeframes))
+    for column, frame in zip(columns, timeframes, strict=True):
+        icon = DIRECTION_ICON.get(frame["direction"], "⚪")
+        column.metric(frame["interval"], f"{icon} {frame['direction']}")
+
+
 def render_assessment(title: str, report: dict[str, Any], key: str = "assessment") -> None:
     assessment = report[key]
     direction = assessment.get("direction", "neutral")
@@ -80,10 +94,19 @@ def page_analysis() -> None:
     st.header("Analysis")
 
     with st.form("analysis"):
-        columns = st.columns([2, 1, 3])
+        columns = st.columns([2, 3])
         symbol = columns[0].text_input("Symbol", value="AAPL").strip().upper()
-        interval = columns[1].selectbox("Interval", ["1d", "1h", "1wk", "15m", "5m", "1m"])
-        agents = columns[2].multiselect("Agents", AGENTS, default=AGENTS)
+        intervals = columns[1].multiselect(
+            "Timeframes (multi-timeframe analysis)",
+            TIMEFRAMES,
+            default=DEFAULT_TIMEFRAMES,
+            help=(
+                "Pick several and the technical and chart-pattern agents reason about "
+                "alignment across them, weighting the highest as context. "
+                "4H is aggregated from 1H."
+            ),
+        )
+        agents = st.multiselect("Agents", AGENTS, default=AGENTS)
         submitted = st.form_submit_button("Run analysis", type="primary")
 
     if not submitted:
@@ -92,11 +115,15 @@ def page_analysis() -> None:
     if not symbol:
         st.warning("Enter a symbol.")
         return
+    if not intervals:
+        st.warning("Pick at least one timeframe.")
+        return
 
     api = client()
     try:
-        with st.spinner(f"Running {len(agents)} agents on {symbol}…"):
-            result = api.analyze(symbol, interval, agents)
+        selected = ", ".join(intervals)
+        with st.spinner(f"Running {len(agents)} agents on {symbol} across {selected}..."):
+            result = api.analyze(symbol, intervals, agents)
     except ApiError as exc:
         show_error(exc)
         return
@@ -106,17 +133,80 @@ def page_analysis() -> None:
     for failure in result.get("failures", []):
         st.warning(f"**{failure['agent']}** did not complete: {failure['error']}")
 
+    st.caption("Timeframes analysed: " + ", ".join(result.get("intervals", [])))
+
     if technical := result.get("technical_report"):
         render_assessment("Technical", technical)
-        with st.expander("Indicator readings"):
+        st.info(f"**Timeframe alignment.** {technical['assessment']['timeframe_alignment']}")
+        render_timeframe_directions(technical["timeframes"])
+        for frame in technical["timeframes"]:
+            with st.expander(f"Indicator readings - {frame['interval']}"):
+                st.dataframe(
+                    [
+                        {
+                            "indicator": reading["name"],
+                            "direction": reading["direction"],
+                            "summary": reading["summary"],
+                        }
+                        for reading in frame["readings"]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    if patterns := result.get("chart_pattern_report"):
+        render_assessment("Chart patterns", patterns)
+        st.info(f"**Timeframe alignment.** {patterns['assessment']['timeframe_alignment']}")
+        render_timeframe_directions(patterns["timeframes"])
+        for frame in patterns["timeframes"]:
+            label = (
+                f"{frame['interval']} - {len(frame['patterns'])} patterns, "
+                f"{len(frame['levels'])} levels"
+            )
+            with st.expander(label):
+                if frame["patterns"]:
+                    st.dataframe(
+                        [
+                            {
+                                "pattern": pattern["kind"],
+                                "direction": pattern["direction"],
+                                "confirmed": pattern["confirmed"],
+                                "quality": pattern["quality"],
+                                "summary": pattern["summary"],
+                            }
+                            for pattern in frame["patterns"]
+                        ],
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.caption("No formations detected on this timeframe.")
+                if frame["levels"]:
+                    st.dataframe(
+                        [
+                            {
+                                "level": level["kind"],
+                                "price": level["price"],
+                                "touches": level["touches"],
+                                "distance %": level["distance_pct"],
+                            }
+                            for level in frame["levels"]
+                        ],
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+    if research := result.get("market_research_report"):
+        render_assessment(f"Market research vs {research['benchmark']}", research)
+        with st.expander("Relative measurements"):
             st.dataframe(
                 [
                     {
-                        "indicator": reading["name"],
+                        "measure": reading["name"],
                         "direction": reading["direction"],
                         "summary": reading["summary"],
                     }
-                    for reading in technical["readings"]
+                    for reading in research["readings"]
                 ],
                 width="stretch",
                 hide_index=True,

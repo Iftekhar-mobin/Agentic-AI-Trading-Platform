@@ -18,16 +18,39 @@ from atp.application.orchestration.state import TradingState
 
 def render_situation(state: TradingState) -> str:
     """Build a compact, factual digest of everything the analysis pool produced."""
-    lines = [f"{state.symbol} ({state.interval.value}) analysis."]
+    timeframes = "/".join(interval.value for interval in state.intervals)
+    lines = [f"{state.symbol} ({timeframes}) analysis."]
 
     if (technical := state.technical_report) is not None:
-        counts = ", ".join(
-            f"{direction.value}={count}" for direction, count in technical.signal_counts.items()
+        per_timeframe = ", ".join(
+            f"{frame.interval.value}={frame.direction.value}" for frame in technical.timeframes
         )
         lines.append(
             f"Technical: {technical.assessment.direction.value} at confidence "
             f"{technical.assessment.confidence:.2f}, close {technical.latest_close:.2f}, "
-            f"indicator signals {counts}. {technical.assessment.reasoning}"
+            f"timeframes {per_timeframe}. {technical.assessment.timeframe_alignment} "
+            f"{technical.assessment.reasoning}"
+        )
+
+    if (patterns := state.chart_pattern_report) is not None:
+        detected = [
+            f"{frame.interval.value}:{pattern.kind.value}"
+            f"{'' if pattern.confirmed else ' (forming)'}"
+            for frame in patterns.timeframes
+            for pattern in frame.patterns
+        ]
+        lines.append(
+            f"Chart patterns: {patterns.assessment.direction.value} at confidence "
+            f"{patterns.assessment.confidence:.2f}. "
+            f"Detected: {', '.join(detected) if detected else 'none'}. "
+            f"{patterns.assessment.reasoning}"
+        )
+
+    if (research := state.market_research_report) is not None:
+        lines.append(
+            f"Market research vs {research.benchmark}: "
+            f"{research.assessment.direction.value} at confidence "
+            f"{research.assessment.confidence:.2f}. {research.assessment.reasoning}"
         )
 
     if (fundamental := state.fundamental_report) is not None:

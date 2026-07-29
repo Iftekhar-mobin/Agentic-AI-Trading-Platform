@@ -58,7 +58,8 @@ Every agent obeys one contract:
 
 ```
 Supervisor (StateGraph router)
-  ├── analysis pool      : technical, fundamental, news, sentiment
+  ├── analysis pool      : technical, chart_pattern, market_research,
+  │                        fundamental, news, sentiment
   │                        (dispatched concurrently in one superstep)
   ├── strategy pool      : strategy_generation → backtesting → optimization
   ├── decision pool      : risk_management (veto power) → portfolio
@@ -194,6 +195,24 @@ the paper broker).
 - **Streamlit over the HTTP API, not the container** — the dashboard is just
   another client. If something is awkward to render, the API is missing
   something, and the React front end will hit the same endpoints unchanged.
+- **Multi-timeframe is one assessment, not N** — the useful output of MTF
+  analysis is the *relationship* between timeframes ("daily is bullish, the
+  hourly is overbought — wait for the pullback"). Running the agent once per
+  timeframe and merging afterwards throws exactly that away, so the agent
+  receives every timeframe at once and returns a single verdict plus an
+  explicit `timeframe_alignment`. A deterministic per-timeframe direction is
+  computed alongside it, so agreement is checkable in code.
+- **4H is synthesized, not sourced** — no mainstream vendor serves it. Rather
+  than drop a standard swing-trading timeframe or teach every adapter to fake
+  one, bars are aggregated in a domain service and applied by a provider
+  decorator, on fixed UTC boundaries so a candle's contents never depend on
+  when the fetch started. The cost is that buckets do not align to exchange
+  sessions, which is documented rather than hidden.
+- **Pattern detection is code, emphatically** — this is where an LLM is most
+  prone to confabulating, because given latitude something is always a head and
+  shoulders. Formations are detected with fixed proportional rules, carry the
+  price levels that define them, and are marked `confirmed` or forming; the
+  model is told the list is exhaustive and may not add to it.
 - **Analysis agents fan out** — technical, fundamental, news and sentiment are
   independent (none reads another's output), so the supervisor dispatches them
   in one superstep. That is four LLM round-trips of latency collapsed into one.

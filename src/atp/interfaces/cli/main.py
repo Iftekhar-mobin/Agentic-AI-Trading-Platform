@@ -4,7 +4,7 @@ Commands:
     atp status                     -- show configuration wiring (smoke check)
     atp sync AAPL -i 1d            -- pull bars from the provider into storage
     atp bars AAPL -i 1d -n 10      -- show stored bars
-    atp analyze AAPL -i 1d         -- run every analysis agent (supervisor graph)
+    atp analyze AAPL -t 1d,4h,1h   -- multi-timeframe run of every analysis agent
     atp analyze AAPL -a news_analysis,sentiment_analysis  -- run a subset
     atp backtest AAPL -s ema_cross -- backtest a strategy preset (or -f file.json)
     atp optimize AAPL -s ema_cross -- optimize strategy parameters (add --walk-forward)
@@ -39,6 +39,8 @@ from atp.domain.models.memory import EpisodeMatch, LearningReport
 from atp.domain.models.news import NewsReport
 from atp.domain.models.optimization import OptimizationResult, WalkForwardResult
 from atp.domain.models.orders import Order
+from atp.domain.models.patterns import ChartPatternReport
+from atp.domain.models.research import MarketResearchReport
 from atp.domain.models.sentiment import SentimentReport
 from atp.domain.models.strategy import StrategyDefinition
 from atp.domain.models.trading import OrderSide, Portfolio, RiskDecision
@@ -69,7 +71,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     analyze = subparsers.add_parser("analyze", help="run the analysis workflow")
     analyze.add_argument("symbol")
-    analyze.add_argument("-i", "--interval", choices=intervals, default="1d")
+    analyze.add_argument(
+        "-t",
+        "--timeframes",
+        default="1d",
+        help=(
+            "comma-separated timeframes for multi-timeframe analysis, e.g. 1d,4h,1h "
+            f"(available: {','.join(intervals)}; read highest to lowest)"
+        ),
+    )
     analyze.add_argument(
         "-a",
         "--agents",
@@ -221,14 +231,15 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
             log.info("orders.total", count=len(records))
             return
 
-        interval = BarInterval(args.interval)
-
         if args.command == "analyze":
             # Runs through the supervisor graph; no init_db, because analysis
             # falls back to the live provider when storage is down.
             agents = args.agents.split(",") if args.agents else None
+            timeframes = [
+                BarInterval(value.strip()) for value in args.timeframes.split(",") if value.strip()
+            ]
             try:
-                state = await container.orchestrator.run(args.symbol, interval, agents=agents)
+                state = await container.orchestrator.run(args.symbol, timeframes, agents=agents)
             except UnknownAgentError as exc:
                 log.error("analyze.unknown_agents", error=str(exc))
                 raise SystemExit(1) from exc
@@ -238,6 +249,8 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
                 raise SystemExit(1)
             _print_analysis(state)
             return
+
+        interval = BarInterval(args.interval)
 
         if args.command == "backtest":
             strategy = (
@@ -480,6 +493,10 @@ def _print_learning(report: LearningReport) -> None:
 def _print_analysis(state: TradingState) -> None:
     if state.technical_report is not None:
         _print_report(state.technical_report)
+    if state.chart_pattern_report is not None:
+        _print_patterns(state.chart_pattern_report)
+    if state.market_research_report is not None:
+        _print_research(state.market_research_report)
     if state.fundamental_report is not None:
         _print_fundamentals(state.fundamental_report)
     if state.news_report is not None:
@@ -491,24 +508,96 @@ def _print_analysis(state: TradingState) -> None:
 
 
 def _print_report(report: TechnicalReport) -> None:
+    for timeframe in report.timeframes:
+        for reading in timeframe.readings:
+            log.info(
+                "indicator",
+                interval=timeframe.interval.value,
+                name=reading.name,
+                direction=reading.direction.value,
+                summary=reading.summary,
+            )
+        log.info(
+            "analysis.timeframe",
+            interval=timeframe.interval.value,
+            as_of=timeframe.as_of.isoformat(),
+            latest_close=timeframe.latest_close,
+            direction=timeframe.direction.value,
+            signal_counts={d.value: n for d, n in timeframe.signal_counts.items()},
+        )
+    assessment = report.assessment
+    log.info(
+        "analysis.assessment",
+        symbol=report.symbol,
+        timeframes=[interval.value for interval in report.intervals],
+        aligned=report.aligned,
+        direction=assessment.direction.value,
+        confidence=assessment.confidence,
+    )
+    log.info("analysis.timeframe_alignment", text=assessment.timeframe_alignment)
+    _print_explanation("analysis", assessment)
+
+
+def _print_patterns(report: ChartPatternReport) -> None:
+    for timeframe in report.timeframes:
+        for level in timeframe.levels:
+            log.info(
+                "level",
+                interval=timeframe.interval.value,
+                kind=level.kind.value,
+                price=level.price,
+                touches=level.touches,
+                distance_pct=level.distance_pct,
+            )
+        for pattern in timeframe.patterns:
+            log.info(
+                "pattern",
+                interval=timeframe.interval.value,
+                kind=pattern.kind.value,
+                direction=pattern.direction.value,
+                confirmed=pattern.confirmed,
+                quality=pattern.quality,
+                summary=pattern.summary,
+            )
+        log.info(
+            "patterns.timeframe",
+            interval=timeframe.interval.value,
+            direction=timeframe.direction.value,
+            swings=len(timeframe.swings),
+            patterns=len(timeframe.patterns),
+        )
+    assessment = report.assessment
+    log.info(
+        "patterns.assessment",
+        symbol=report.symbol,
+        timeframes=[interval.value for interval in report.intervals],
+        direction=assessment.direction.value,
+        confidence=assessment.confidence,
+    )
+    log.info("patterns.timeframe_alignment", text=assessment.timeframe_alignment)
+    _print_explanation("patterns", assessment)
+
+
+def _print_research(report: MarketResearchReport) -> None:
     for reading in report.readings:
         log.info(
-            "indicator",
+            "market_context",
             name=reading.name,
             direction=reading.direction.value,
             summary=reading.summary,
         )
     assessment = report.assessment
     log.info(
-        "analysis.assessment",
+        "research.assessment",
         symbol=report.symbol,
-        as_of=report.as_of.isoformat(),
-        latest_close=report.latest_close,
+        benchmark=report.benchmark,
+        interval=report.interval.value,
+        overlapping_bars=report.overlapping_bars,
         direction=assessment.direction.value,
         confidence=assessment.confidence,
         signal_counts={d.value: n for d, n in report.signal_counts.items()},
     )
-    _print_explanation("analysis", assessment)
+    _print_explanation("research", assessment)
 
 
 def _print_fundamentals(report: FundamentalReport) -> None:

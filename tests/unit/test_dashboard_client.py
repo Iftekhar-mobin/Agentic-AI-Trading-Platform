@@ -37,7 +37,7 @@ def test_api_key_is_sent_as_a_bearer_token() -> None:
     assert seen["auth"] == "Bearer secret"
 
 
-def test_analysis_sends_the_selected_agents() -> None:
+def test_analysis_sends_the_selected_timeframes_and_agents() -> None:
     seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -46,8 +46,12 @@ def test_analysis_sends_the_selected_agents() -> None:
         seen.update(json.loads(request.content))
         return httpx.Response(200, json={"symbol": "AAPL"})
 
-    make_client(handler).analyze("AAPL", "1d", ["news_analysis"])
-    assert seen == {"symbol": "AAPL", "interval": "1d", "agents": ["news_analysis"]}
+    make_client(handler).analyze("AAPL", ["1d", "4h"], ["news_analysis"])
+    assert seen == {
+        "symbol": "AAPL",
+        "intervals": ["1d", "4h"],
+        "agents": ["news_analysis"],
+    }
 
 
 def test_memory_omits_an_empty_query() -> None:

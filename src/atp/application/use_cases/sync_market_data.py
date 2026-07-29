@@ -25,6 +25,8 @@ DEFAULT_LOOKBACK: dict[BarInterval, timedelta] = {
     BarInterval.MIN_5: timedelta(days=30),
     BarInterval.MIN_15: timedelta(days=30),
     BarInterval.HOUR_1: timedelta(days=180),
+    # 4h is aggregated from 1h, so it inherits that fetch limit.
+    BarInterval.HOUR_4: timedelta(days=180),
     BarInterval.DAY_1: timedelta(days=730),
     BarInterval.WEEK_1: timedelta(days=1825),
 }

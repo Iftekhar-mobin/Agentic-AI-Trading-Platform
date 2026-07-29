@@ -154,6 +154,16 @@ class ObservabilitySettings(BaseModel):
     trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+class ResearchSettings(BaseModel):
+    """Market research settings (env: ``ATP_RESEARCH__*``).
+
+    The benchmark is what "the market" means for relative strength. SPY suits
+    US equities; an FTSE or crypto book should point this elsewhere.
+    """
+
+    benchmark: str = Field(default="SPY", min_length=1, max_length=12)
+
+
 class MemoryBackend(StrEnum):
     JSON = "json"
     QDRANT = "qdrant"
@@ -219,6 +229,7 @@ class Settings(BaseSettings):
     news: NewsSettings = Field(default_factory=NewsSettings)
     sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    research: ResearchSettings = Field(default_factory=ResearchSettings)
     api: SecuritySettings = Field(default_factory=SecuritySettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 

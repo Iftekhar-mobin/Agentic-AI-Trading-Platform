@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import cast
 
 import pytest
 from factories import (
+    make_chart_pattern_report,
     make_fundamental_report,
     make_learning_report,
+    make_market_research_report,
     make_news_report,
     make_sentiment_report,
     make_technical_report,
@@ -24,7 +26,9 @@ from atp.application.orchestration import (
     resolve_agents,
 )
 from atp.application.use_cases import (
+    AnalyzeChartPatterns,
     AnalyzeFundamentals,
+    AnalyzeMarketResearch,
     AnalyzeNews,
     AnalyzeSentiment,
     AnalyzeTicker,
@@ -47,11 +51,17 @@ class StubUseCase:
         self._report_factory = report_factory
         self._error = error
         self.calls: list[str] = []
+        self.intervals: list[Sequence[BarInterval] | BarInterval] = []
         self.started = asyncio.Event()
         self.release: asyncio.Event | None = None
 
-    async def execute(self, symbol: str, interval: BarInterval = BarInterval.DAY_1) -> BaseModel:
+    async def execute(
+        self,
+        symbol: str,
+        intervals: Sequence[BarInterval] | BarInterval = BarInterval.DAY_1,
+    ) -> BaseModel:
         self.calls.append(symbol)
+        self.intervals.append(intervals)
         self.started.set()
         if self.release is not None:
             await self.release.wait()
@@ -85,14 +95,29 @@ class Stubs:
 
     def __init__(self, **errors: Exception) -> None:
         self.technical = StubUseCase(make_technical_report, error=errors.get("technical"))
+        self.patterns = StubUseCase(make_chart_pattern_report, error=errors.get("patterns"))
+        self.research = StubUseCase(make_market_research_report, error=errors.get("research"))
         self.fundamental = StubUseCase(make_fundamental_report, error=errors.get("fundamental"))
         self.news = StubUseCase(make_news_report, error=errors.get("news"))
         self.sentiment = StubUseCase(make_sentiment_report, error=errors.get("sentiment"))
         self.learning = StubLearning(error=errors.get("learning"))
 
+    @property
+    def analysis(self) -> tuple[StubUseCase, ...]:
+        return (
+            self.technical,
+            self.patterns,
+            self.research,
+            self.fundamental,
+            self.news,
+            self.sentiment,
+        )
+
     def orchestrator(self) -> TradingOrchestrator:
         return TradingOrchestrator(
             cast(AnalyzeTicker, self.technical),
+            cast(AnalyzeChartPatterns, self.patterns),
+            cast(AnalyzeMarketResearch, self.research),
             cast(AnalyzeFundamentals, self.fundamental),
             cast(AnalyzeNews, self.news),
             cast(AnalyzeSentiment, self.sentiment),
@@ -133,6 +158,8 @@ async def test_learning_runs_after_analysis_and_sees_its_output() -> None:
 async def test_learning_is_skipped_when_no_analysis_produced_anything() -> None:
     stubs = Stubs(
         technical=InsufficientHistoryError("no bars"),
+        patterns=InsufficientHistoryError("no bars"),
+        research=InsufficientHistoryError("no overlap"),
         fundamental=InsufficientDataError("no metrics"),
         news=InsufficientDataError("no articles"),
         sentiment=InsufficientDataError("no articles"),
@@ -157,7 +184,7 @@ async def test_each_agent_runs_exactly_once() -> None:
     stubs = Stubs()
     await stubs.orchestrator().run("AAPL")
 
-    for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment):
+    for stub in stubs.analysis:
         assert len(stub.calls) == 1
     assert len(stubs.learning.situations) == 1
 
@@ -166,17 +193,12 @@ async def test_agents_are_dispatched_concurrently() -> None:
     """Every agent starts before any is allowed to finish — i.e. one superstep."""
     stubs = Stubs()
     release = asyncio.Event()
-    for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment):
+    for stub in stubs.analysis:
         stub.release = release
 
     run = asyncio.create_task(stubs.orchestrator().run("AAPL"))
     await asyncio.wait_for(
-        asyncio.gather(
-            *(
-                stub.started.wait()
-                for stub in (stubs.technical, stubs.fundamental, stubs.news, stubs.sentiment)
-            )
-        ),
+        asyncio.gather(*(stub.started.wait() for stub in stubs.analysis)),
         timeout=5,
     )
     release.set()
@@ -218,6 +240,8 @@ async def test_one_failure_does_not_cost_the_other_reports() -> None:
 async def test_total_failure_leaves_no_report() -> None:
     stubs = Stubs(
         technical=InsufficientHistoryError("no bars"),
+        patterns=InsufficientHistoryError("no bars"),
+        research=InsufficientHistoryError("no overlap"),
         fundamental=InsufficientDataError("no metrics"),
         news=InsufficientDataError("no articles"),
         sentiment=InsufficientDataError("no articles"),
