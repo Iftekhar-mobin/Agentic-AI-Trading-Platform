@@ -1,6 +1,7 @@
 """Application configuration."""
 
 from atp.infrastructure.config.settings import (
+    ApiKey,
     DatabaseSettings,
     Environment,
     ExecutionSettings,
@@ -8,7 +9,10 @@ from atp.infrastructure.config.settings import (
     MemoryBackend,
     MemorySettings,
     NewsSettings,
+    ObservabilitySettings,
     RedisSettings,
+    Scope,
+    SecuritySettings,
     SentimentModelName,
     SentimentSettings,
     Settings,
@@ -17,6 +21,7 @@ from atp.infrastructure.config.settings import (
 )
 
 __all__ = [
+    "ApiKey",
     "DatabaseSettings",
     "Environment",
     "ExecutionSettings",
@@ -24,7 +29,10 @@ __all__ = [
     "MemoryBackend",
     "MemorySettings",
     "NewsSettings",
+    "ObservabilitySettings",
     "RedisSettings",
+    "Scope",
+    "SecuritySettings",
     "SentimentModelName",
     "SentimentSettings",
     "Settings",

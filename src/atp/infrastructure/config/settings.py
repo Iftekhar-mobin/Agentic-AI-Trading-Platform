@@ -12,7 +12,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from atp.domain.models.trading import RiskLimits
@@ -91,6 +91,69 @@ class SentimentSettings(BaseModel):
     )
 
 
+class Scope(StrEnum):
+    """What an API key is allowed to do.
+
+    Deliberately coarse: reading analysis and portfolio state is very different
+    from spending money, and everything in between is a policy question this
+    platform should not be guessing at.
+    """
+
+    READ = "read"
+    TRADE = "trade"
+
+
+class ApiKey(BaseModel):
+    """One credential. ``name`` is for the audit log; the key itself is never logged."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1)
+    key: SecretStr
+    scopes: tuple[Scope, ...] = (Scope.READ,)
+
+    def allows(self, scope: Scope) -> bool:
+        return scope in self.scopes
+
+
+class SecuritySettings(BaseModel):
+    """API authentication and hardening (env: ``ATP_API__*``).
+
+    ``keys`` is JSON in the environment, e.g.::
+
+        ATP_API__KEYS='[{"name":"dashboard","key":"...","scopes":["read"]}]'
+
+    With no keys configured the API runs unauthenticated, which is convenient
+    on a laptop and unacceptable anywhere else — ``Settings`` refuses to start
+    in production without them.
+    """
+
+    keys: tuple[ApiKey, ...] = ()
+    cors_origins: tuple[str, ...] = ()
+    rate_limit_per_minute: int = Field(
+        default=60,
+        ge=0,
+        le=100_000,
+        description="Requests per minute per credential (0 disables the limiter)",
+    )
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self.keys)
+
+
+class ObservabilitySettings(BaseModel):
+    """Tracing settings (env: ``ATP_OBSERVABILITY__*``).
+
+    Tracing stays off until an OTLP endpoint is configured: an exporter with
+    nowhere to send spans is pure overhead.
+    """
+
+    otlp_endpoint: str | None = None
+    service_name: str = "atp"
+    trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
 class MemoryBackend(StrEnum):
     JSON = "json"
     QDRANT = "qdrant"
@@ -156,6 +219,8 @@ class Settings(BaseSettings):
     news: NewsSettings = Field(default_factory=NewsSettings)
     sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    api: SecuritySettings = Field(default_factory=SecuritySettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
@@ -166,6 +231,17 @@ class Settings(BaseSettings):
         if self.log_json is not None:
             return self.log_json
         return self.environment is not Environment.DEVELOPMENT
+
+    @model_validator(mode="after")
+    def _require_api_keys_in_production(self) -> Settings:
+        """An unauthenticated API is a development convenience, never a deployment."""
+        if self.environment is Environment.PRODUCTION and not self.api.keys:
+            msg = (
+                "environment=production requires at least one API key; "
+                "set ATP_API__KEYS to a JSON list of {name, key, scopes}"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _forbid_live_trading_outside_production(self) -> Settings:

@@ -11,11 +11,24 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from atp.infrastructure.config import Environment, Settings, TradingMode
+from atp.infrastructure.config import (
+    ApiKey,
+    Environment,
+    Scope,
+    SecuritySettings,
+    Settings,
+    TradingMode,
+)
 
 
 def _settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **overrides)
+
+
+def _production(**overrides: Any) -> Settings:
+    """Production settings need a credential; every production test supplies one."""
+    api = SecuritySettings(keys=(ApiKey(name="test", key="k", scopes=(Scope.READ, Scope.TRADE)),))
+    return _settings(environment="production", api=api, **overrides)
 
 
 class TestDefaults:
@@ -56,7 +69,7 @@ class TestLiveTradingGuard:
             _settings(trading_mode="live", environment="development")
 
     def test_live_trading_allowed_in_production(self) -> None:
-        settings = _settings(trading_mode="live", environment="production")
+        settings = _production(trading_mode="live")
         assert settings.trading_mode is TradingMode.LIVE
 
 
@@ -65,7 +78,7 @@ class TestLogFormatDefaults:
         assert _settings(environment="development").use_json_logs is False
 
     def test_production_defaults_to_json_logs(self) -> None:
-        assert _settings(environment="production", trading_mode="paper").use_json_logs is True
+        assert _production(trading_mode="paper").use_json_logs is True
 
     def test_explicit_override_wins(self) -> None:
         assert _settings(environment="development", log_json=True).use_json_logs is True
@@ -73,3 +86,24 @@ class TestLogFormatDefaults:
     def test_secrets_are_masked_in_repr(self) -> None:
         settings = _settings()
         assert "atp" not in repr(settings.database.password)
+
+
+class TestApiKeyGuard:
+    def test_production_requires_a_credential(self) -> None:
+        with pytest.raises(ValidationError, match="requires at least one API key"):
+            _settings(environment="production")
+
+    def test_production_starts_with_a_credential(self) -> None:
+        assert _production().api.auth_required is True
+
+    def test_development_may_run_unauthenticated(self) -> None:
+        assert _settings().api.auth_required is False
+
+    def test_scopes_are_checked_per_key(self) -> None:
+        read_only = ApiKey(name="dashboard", key="k", scopes=(Scope.READ,))
+        assert read_only.allows(Scope.READ)
+        assert not read_only.allows(Scope.TRADE)
+
+    def test_keys_are_masked_in_reprs(self) -> None:
+        key = ApiKey(name="dashboard", key="super-secret", scopes=(Scope.READ,))
+        assert "super-secret" not in repr(key)

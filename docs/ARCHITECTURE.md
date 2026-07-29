@@ -1,6 +1,6 @@
 # Agentic AI Trading Platform — Architecture
 
-> Living document. Version 0.1 — initial system design (2026-07-23).
+> Living document. Version 0.2 — milestones 0-10 delivered (2026-07-29).
 
 ## 1. Vision
 
@@ -105,14 +105,21 @@ agentic-trading-platform/
 │   │   └── use_cases/              # AnalyzeTicker, RunBacktest, PlaceTrade, ...
 │   ├── infrastructure/
 │   │   ├── market_data/            # yfinance_adapter, polygon_adapter, ...
+│   │   ├── fundamentals/           # company metrics snapshots
+│   │   ├── news/                   # article retrieval
+│   │   ├── sentiment/              # finbert (optional), lexicon (default)
+│   │   ├── embeddings/             # hashing (default), hosted models later
+│   │   ├── memory/                 # qdrant_memory, json_memory
 │   │   ├── brokers/                # alpaca_adapter (paper), ibkr_adapter, ...
 │   │   ├── llm/                    # anthropic_client, openai_client
 │   │   ├── indicators/             # deterministic TA engine (pandas/polars)
 │   │   ├── backtesting/            # backtesting.py integration, walk-forward
+│   │   ├── optimization/           # optuna
+│   │   ├── observability/          # structlog config, OpenTelemetry tracing
 │   │   ├── persistence/            # SQLAlchemy repos, Timescale, Redis, Qdrant
 │   │   └── config/                 # pydantic-settings, secrets loading
 │   ├── interfaces/
-│   │   ├── api/                    # FastAPI routers, schemas, deps
+│   │   ├── api/                    # routers, security, middleware, errors
 │   │   └── cli/
 │   └── composition.py              # DI container / composition root
 ├── ui/streamlit_app/               # internal dashboard (React later)
@@ -124,21 +131,24 @@ agentic-trading-platform/
 
 ## 6. Milestone Roadmap
 
-| # | Milestone | Delivers |
-|---|-----------|----------|
-| 0 | Foundation | Repo scaffold, tooling (ruff, mypy, pytest, pre-commit), config, logging, Docker Compose (Postgres+Timescale, Redis), CI |
-| 1 | Domain + market data | Core domain models, `MarketDataProvider` port, yfinance adapter, Timescale persistence, first tests |
-| 2 | Indicator engine + TA agent | Deterministic indicator library, signal classification, first LLM-backed agent with explainability envelope |
-| 3 | Orchestration skeleton | LangGraph supervisor, `TradingState`, end-to-end "analyze ticker" flow via CLI + FastAPI endpoint |
-| 4 | Strategy + backtesting | Strategy definition schema (declarative rules), backtesting.py integration, metrics suite, look-ahead-bias guards |
-| 5 | Optimization | Optuna integration, walk-forward validation, Monte Carlo, overfitting controls |
-| 6 | Risk + portfolio | Risk limit engine (hard gate), position sizing, portfolio tracking + rebalancing |
-| 7 | Execution | Alpaca paper trading, order state machine, bracket/trailing orders, execution audit log |
-| 8 | Intelligence expansion | Fundamentals, news, sentiment agents; FinBERT + LLM pipeline |
-| 9 | Learning + memory | Qdrant episodic memory, trade journaling, regime tagging, retrieval into future decisions |
-| 10 | Product surface | Streamlit dashboard → React, authn/z, observability (OpenTelemetry), hardening |
+| # | Milestone | Delivers | Status |
+|---|-----------|----------|--------|
+| 0 | Foundation | Repo scaffold, tooling (ruff, mypy, pytest, pre-commit), config, logging, Docker Compose (Postgres+Timescale, Redis), CI | ✅ |
+| 1 | Domain + market data | Core domain models, `MarketDataProvider` port, yfinance adapter, Timescale persistence, first tests | ✅ |
+| 2 | Indicator engine + TA agent | Deterministic indicator library, signal classification, first LLM-backed agent with explainability envelope | ✅ |
+| 3 | Orchestration skeleton | LangGraph supervisor, `TradingState`, end-to-end "analyze ticker" flow via CLI + FastAPI endpoint | ✅ |
+| 4 | Strategy + backtesting | Strategy definition schema (declarative rules), backtesting.py integration, metrics suite, look-ahead-bias guards | ✅ |
+| 5 | Optimization | Optuna integration, walk-forward validation, Monte Carlo, overfitting controls | ✅ |
+| 6 | Risk + portfolio | Risk limit engine (hard gate), position sizing, portfolio tracking + rebalancing | ✅ |
+| 7 | Execution | Alpaca paper trading, order state machine, bracket/trailing orders, execution audit log | ✅ |
+| 8 | Intelligence expansion | Fundamentals, news, sentiment agents; FinBERT + LLM pipeline | ✅ |
+| 9 | Learning + memory | Qdrant episodic memory, trade journaling, regime tagging, retrieval into future decisions | ✅ |
+| 10 | Product surface | Streamlit dashboard → React, authn/z, observability (OpenTelemetry), hardening | ✅ |
 
-Each milestone ends with working, tested, demoable software.
+Each milestone ends with working, tested, demoable software. All ten are
+delivered; the roadmap now continues into hardening the pieces marked as
+starter implementations below (in-process rate limiting, hashing embeddings,
+the paper broker).
 
 ## 7. Key Decisions & Trade-offs
 
@@ -173,6 +183,17 @@ Each milestone ends with working, tested, demoable software.
   regime, a failed write: each is logged and the reflection still returns. An
   analysis workflow that fails because a database is down is a worse trade than
   one that returns without precedent.
+- **API keys, not user accounts (yet)** — the platform has one operator and one
+  paper portfolio, so scoped bearer keys buy the property that actually matters
+  now: a dashboard credential that can read everything cannot place an order.
+  Real user accounts arrive with real multi-tenancy, not before.
+- **Unauthenticated mode cannot be deployed** — running open is what makes
+  `atp serve` usable on a laptop, so instead of removing it, `Settings` refuses
+  to start in production without keys and every anonymous request is logged.
+  A safe default beats a documented warning.
+- **Streamlit over the HTTP API, not the container** — the dashboard is just
+  another client. If something is awkward to render, the API is missing
+  something, and the React front end will hit the same endpoints unchanged.
 - **Analysis agents fan out** — technical, fundamental, news and sentiment are
   independent (none reads another's output), so the supervisor dispatches them
   in one superstep. That is four LLM round-trips of latency collapsed into one.

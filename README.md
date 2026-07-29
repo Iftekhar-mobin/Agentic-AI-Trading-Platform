@@ -25,6 +25,7 @@ uv run atp analyze AAPL    # run all analysis agents in parallel (needs an Anthr
 uv run atp analyze AAPL -a technical_analysis,news_analysis   # run a subset
 uv run atp backtest AAPL -s ema_cross   # backtest a strategy preset
 uv run atp serve           # start the HTTP API on http://127.0.0.1:8000
+uv run streamlit run ui/streamlit_app/app.py   # dashboard (needs the API running)
 uv run pytest              # run the test suite
 ```
 
@@ -91,9 +92,30 @@ Qdrant (`docker compose up -d`) for production:
 ATP_MEMORY__BACKEND=qdrant uv run atp analyze AAPL
 ```
 
+## Security and operations
+
+- **Authentication** — bearer API keys with `read` / `trade` scopes, configured
+  as JSON in `ATP_API__KEYS`. With no keys the API runs open, which is handy on
+  a laptop and refused outright in production: `ATP_ENVIRONMENT=production`
+  will not start without at least one key.
+- **Rate limiting** — per credential, `ATP_API__RATE_LIMIT_PER_MINUTE`
+  (`/health` is never throttled). In-process for now; Redis when there is more
+  than one replica.
+- **Correlation** — every response carries `X-Request-ID`, and every log line
+  produced during that request carries the same id. Send your own to keep a
+  trace whole across services.
+- **Tracing** — OpenTelemetry over OTLP/HTTP, off unless
+  `ATP_OBSERVABILITY__OTLP_ENDPOINT` is set. When on, logs also carry
+  `trace_id` and `span_id`.
+- **Errors** — domain failures map to meaningful statuses (422 bad input, 409
+  execution conflict, 502 model failure, 503 dependency down) with the request
+  id in the body.
+
 ## Safety defaults
 
 - `trading_mode` defaults to **paper**; `live` is rejected unless
   `ATP_ENVIRONMENT=production`.
 - Secrets load from environment / `.env` only (never committed) and are masked
   in logs and reprs via `SecretStr`.
+- Every order — filled or refused by the risk gate — lands in the append-only
+  audit trail and the episodic journal, whichever interface placed it.

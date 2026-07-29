@@ -24,6 +24,7 @@ dependencies = [
     "opentelemetry-sdk>=1.44.0",
     "opentelemetry-instrumentation-fastapi>=0.65b0",
     "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -79,8 +80,10 @@ select = [
 [tool.mypy]
 strict = true
 python_version = "3.12"
-mypy_path = "src"
-files = ["src", "tests"]
+# ui/streamlit_app is on the path so the dashboard client is type-checked too
+# (the tests import it directly, exactly as Streamlit does).
+mypy_path = "src:ui/streamlit_app"
+files = ["src", "tests", "ui/streamlit_app/client.py"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]

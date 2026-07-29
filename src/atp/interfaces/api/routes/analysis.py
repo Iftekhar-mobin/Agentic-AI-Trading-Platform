@@ -21,8 +21,9 @@ from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
 from atp.domain.models.sentiment import SentimentReport
 from atp.interfaces.api.schemas import AgentFailureSchema
+from atp.interfaces.api.security import RequiresRead
 
-router = APIRouter(tags=["analysis"])
+router = APIRouter(tags=["analysis"], dependencies=[RequiresRead])
 
 
 class AnalysisRequest(BaseModel):
