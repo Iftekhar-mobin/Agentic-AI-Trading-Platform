@@ -15,6 +15,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from atp.domain.models.llm import ActiveModel as ActiveModel
+from atp.domain.models.llm import LLMProvider as LLMProvider
 from atp.domain.models.trading import RiskLimits
 
 
@@ -49,13 +51,53 @@ class DatabaseSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM access settings (env: ``ATP_LLM__*``).
 
-    ``anthropic_api_key`` is optional: when unset, the Anthropic SDK resolves
-    credentials from the environment (``ANTHROPIC_API_KEY`` or an auth profile).
+    Three backends sit behind the same port:
+
+    - ``anthropic`` — hosted, paid, best quality. The production default.
+      ``anthropic_api_key`` is optional: when unset, the SDK resolves
+      credentials from the environment (``ANTHROPIC_API_KEY`` or an auth
+      profile).
+    - ``openrouter`` — aggregator with a free tier (models ending ``:free``).
+      Needs only a free account key.
+    - ``ollama`` — local inference. No key, no cost, no data leaving the box.
+
+    Each provider keeps its own model setting so switching back and forth does
+    not lose the other's choice.
     """
 
-    model: str = "claude-opus-4-8"
+    provider: LLMProvider = LLMProvider.ANTHROPIC
     max_tokens: int = 16000
+    request_timeout_seconds: float = Field(default=180.0, gt=0)
+
+    model: str = "claude-opus-4-8"
     anthropic_api_key: SecretStr | None = None
+
+    openrouter_api_key: SecretStr | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "deepseek/deepseek-chat-v3.1:free"
+
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1:8b"
+    # A 7B model on CPU is slow, not broken; and a pull is gigabytes.
+    ollama_timeout_seconds: float = Field(default=600.0, gt=0)
+    ollama_pull_timeout_seconds: float = Field(default=1800.0, gt=0)
+
+    allow_runtime_model_switching: bool = Field(
+        default=True,
+        description="Whether the API may change the active model (disable in production)",
+    )
+
+    def model_for(self, provider: LLMProvider) -> str:
+        """The configured model for a provider, whichever one is active."""
+        if provider is LLMProvider.OPENROUTER:
+            return self.openrouter_model
+        if provider is LLMProvider.OLLAMA:
+            return self.ollama_model
+        return self.model
+
+    @property
+    def active(self) -> ActiveModel:
+        return ActiveModel(provider=self.provider, model=self.model_for(self.provider))
 
 
 class SentimentModelName(StrEnum):
@@ -101,6 +143,8 @@ class Scope(StrEnum):
 
     READ = "read"
     TRADE = "trade"
+    ADMIN = "admin"
+    """Change platform configuration - today, which language model agents use."""
 
 
 class ApiKey(BaseModel):

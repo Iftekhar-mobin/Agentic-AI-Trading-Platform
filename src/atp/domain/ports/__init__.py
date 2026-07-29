@@ -12,6 +12,7 @@ from atp.domain.ports.indicators import IndicatorEngine
 from atp.domain.ports.llm import LLMClient
 from atp.domain.ports.market_data import MarketDataProvider
 from atp.domain.ports.memory import EpisodicMemory
+from atp.domain.ports.model_catalog import ModelCatalog
 from atp.domain.ports.news import NewsProvider
 from atp.domain.ports.optimization import StrategyOptimizer
 from atp.domain.ports.orders import OrderRepository
@@ -29,6 +30,7 @@ __all__ = [
     "IndicatorEngine",
     "LLMClient",
     "MarketDataProvider",
+    "ModelCatalog",
     "NewsProvider",
     "OrderRepository",
     "PortfolioRepository",

@@ -17,6 +17,9 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 ANALYSIS_TIMEOUT = 300.0
 """Analysis runs several LLM calls; the default 5s timeout would always lose."""
 
+PULL_TIMEOUT = 1800.0
+"""Downloading a local model is gigabytes over the network."""
+
 
 class ApiError(RuntimeError):
     """The API answered with an error status."""
@@ -79,6 +82,23 @@ class AtpClient:
         if query:
             params["query"] = query
         return dict(self._request("GET", f"/memory/{symbol}", params=params))
+
+    def models(self, provider: str | None = None, free_only: bool = False) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if provider:
+            params["provider"] = provider
+        if free_only:
+            params["free_only"] = True
+        return dict(self._request("GET", "/models", params=params))
+
+    def select_model(self, provider: str, model: str) -> dict[str, Any]:
+        payload = {"provider": provider, "model": model}
+        return dict(self._request("POST", "/models/select", json=payload))
+
+    def pull_model(self, provider: str, model: str) -> dict[str, Any]:
+        payload = {"provider": provider, "model": model}
+        # Downloading weights is gigabytes; the default timeout is nowhere near enough.
+        return dict(self._request("POST", "/models/pull", json=payload, timeout=PULL_TIMEOUT))
 
     def risk_check(self, **payload: Any) -> dict[str, Any]:
         return dict(self._request("POST", "/risk-check", json=payload))

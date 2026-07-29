@@ -28,10 +28,18 @@ class AnthropicLLMClient:
         self,
         settings: LLMSettings,
         *,
+        model: str | None = None,
         client: anthropic.AsyncAnthropic | None = None,
     ) -> None:
         self._settings = settings
+        # Overridable so the router can point at a different Anthropic model
+        # without rebuilding settings.
+        self._model = model or settings.model
         self._client = client
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -59,7 +67,7 @@ class AnthropicLLMClient:
     ) -> T:
         try:
             response = await self._get_client().messages.parse(
-                model=self._settings.model,
+                model=self._model,
                 max_tokens=self._settings.max_tokens,
                 system=system,
                 thinking={"type": "adaptive"},
@@ -90,7 +98,7 @@ class AnthropicLLMClient:
 
         log.debug(
             "llm.structured_response",
-            model=self._settings.model,
+            model=self._model,
             response_model=response_model.__name__,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,

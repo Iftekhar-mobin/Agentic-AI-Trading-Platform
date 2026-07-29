@@ -1,10 +1,12 @@
 """Application configuration."""
 
 from atp.infrastructure.config.settings import (
+    ActiveModel,
     ApiKey,
     DatabaseSettings,
     Environment,
     ExecutionSettings,
+    LLMProvider,
     LLMSettings,
     MemoryBackend,
     MemorySettings,
@@ -22,10 +24,12 @@ from atp.infrastructure.config.settings import (
 )
 
 __all__ = [
+    "ActiveModel",
     "ApiKey",
     "DatabaseSettings",
     "Environment",
     "ExecutionSettings",
+    "LLMProvider",
     "LLMSettings",
     "MemoryBackend",
     "MemorySettings",

@@ -105,3 +105,4 @@ def requires(scope: Scope) -> Callable[[ApiKey], Coroutine[Any, Any, ApiKey]]:
 
 RequiresRead = Depends(requires(Scope.READ))
 RequiresTrade = Depends(requires(Scope.TRADE))
+RequiresAdmin = Depends(requires(Scope.ADMIN))

@@ -27,7 +27,14 @@ from atp.infrastructure.observability import configure_tracing, instrument_app
 from atp.interfaces.api.errors import register_error_handlers
 from atp.interfaces.api.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from atp.interfaces.api.rate_limit import RateLimiter, RateLimitMiddleware
-from atp.interfaces.api.routes import analysis, health, memory, portfolio, trading
+from atp.interfaces.api.routes import (
+    analysis,
+    health,
+    memory,
+    models,
+    portfolio,
+    trading,
+)
 
 log = structlog.get_logger()
 
@@ -36,7 +43,8 @@ Multi-agent trading assistant. Every recommendation carries its reasoning,
 evidence, calibrated confidence, and the conditions that would invalidate it.
 
 Authenticate with `Authorization: Bearer <api-key>`. Read endpoints need the
-`read` scope; `POST /trade` needs `trade`.
+`read` scope, `POST /trade` needs `trade`, and changing the active language
+model needs `admin`.
 """
 
 
@@ -62,6 +70,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             environment=settings.environment.value,
             trading_mode=settings.trading_mode.value,
             auth=settings.api.auth_required,
+            llm=str(built.llm_router.active),
             tracing=tracing_enabled,
             rate_limit_per_minute=settings.api.rate_limit_per_minute,
         )
@@ -92,7 +101,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     )
 
     register_error_handlers(app)
-    for router in (health, analysis, portfolio, memory, trading):
+    for router in (health, analysis, portfolio, memory, trading, models):
         app.include_router(router.router)
 
     instrument_app(app)

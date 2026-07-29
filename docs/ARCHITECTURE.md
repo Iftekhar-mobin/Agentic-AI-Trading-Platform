@@ -195,6 +195,21 @@ the paper broker).
 - **Streamlit over the HTTP API, not the container** — the dashboard is just
   another client. If something is awkward to render, the API is missing
   something, and the React front end will hit the same endpoints unchanged.
+- **Three model backends, one port** — the platform is useless to evaluate if
+  running it costs Anthropic money from the first minute, so OpenRouter's free
+  tier and local Ollama are first-class alternatives rather than an afterthought.
+  Agents never learn which answered.
+- **The explainability envelope is enforced on the way in, not requested on the
+  way out** — Anthropic validates server-side and Ollama constrains decoding to
+  the schema, but free hosted models do neither reliably. Responses are
+  therefore extracted (fences, prose padding) and validated locally, and a model
+  that cannot produce evidence and invalidation conditions fails loudly. The
+  alternative — degrading the contract to match the weakest backend — would
+  quietly remove the property the whole system is built around.
+- **Model switching is runtime, scoped, and disableable** — comparing backends
+  is a read; changing the one every recommendation is produced by is an `admin`
+  action; and deployments that treat the model as a release decision can turn
+  switching off entirely.
 - **Multi-timeframe is one assessment, not N** — the useful output of MTF
   analysis is the *relationship* between timeframes ("daily is bullish, the
   hourly is overbought — wait for the pullback"). Running the agent once per

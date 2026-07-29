@@ -35,8 +35,24 @@ API example:
 ```bash
 curl -X POST http://127.0.0.1:8000/analysis \
   -H "content-type: application/json" \
-  -d '{"symbol": "AAPL", "interval": "1d"}'
+  -H "authorization: Bearer $ATP_KEY" \
+  -d '{"symbol": "AAPL", "intervals": ["1d", "4h", "1h"]}'
 ```
+
+| Endpoint | Scope | Purpose |
+|----------|-------|---------|
+| `GET /health` | none | liveness |
+| `POST /analysis` | `read` | run the agent workflow |
+| `GET /portfolio` | `read` | positions marked to live prices |
+| `GET /orders` | `read` | execution audit trail |
+| `GET /memory/{symbol}` | `read` | recall journalled episodes |
+| `GET /models` | `read` | list models and see which is active |
+| `POST /risk-check` | `read` | size a trade and see the gate's verdict |
+| `POST /trade` | `trade` | execute through the gate |
+| `POST /models/select` | `admin` | switch the active model at runtime |
+| `POST /models/pull` | `admin` | download a local (Ollama) model |
+
+Interactive docs at `/docs`.
 
 Integration tests skip automatically when the database is not running.
 
@@ -128,6 +144,38 @@ ATP_MEMORY__BACKEND=qdrant uv run atp analyze AAPL
 - **Errors** — domain failures map to meaningful statuses (422 bad input, 409
   execution conflict, 502 model failure, 503 dependency down) with the request
   id in the body.
+
+
+## Language models
+
+Agents depend on an `LLMClient` port, so the backend is a runtime choice. Three
+are wired, and the **Models** page in the dashboard lists, switches and downloads
+them without a restart:
+
+| Provider | Cost | Notes |
+|----------|------|-------|
+| `anthropic` | paid | Best quality and schema adherence. The production default. |
+| `openrouter` | **free tier** | Models ending `:free`. Rate-limited and shared, but enough to run the whole platform on a free account. |
+| `ollama` | **free, local** | No key, no per-token cost, and prompts never leave the machine. |
+
+```bash
+# Free hosted models — get a key at openrouter.ai/keys
+ATP_LLM__PROVIDER=openrouter ATP_LLM__OPENROUTER_API_KEY=sk-or-... uv run atp serve
+
+# Fully local — install ollama.com, then:
+ollama serve
+ATP_LLM__PROVIDER=ollama ATP_LLM__OLLAMA_MODEL=llama3.1:8b uv run atp serve
+```
+
+Switching at runtime needs the `admin` scope, and can be turned off entirely with
+`ATP_LLM__ALLOW_RUNTIME_MODEL_SWITCHING=false`.
+
+**The trade-off is schema adherence.** Every agent output must carry reasoning,
+calibrated confidence, cited evidence and invalidation conditions. Anthropic and
+Ollama enforce that during decoding; free OpenRouter models often do not, so
+responses are validated on arrival and a model that cannot comply surfaces as a
+recorded agent failure rather than a half-filled report. Smaller local models
+(under ~7B) fail this often enough to be frustrating.
 
 ## Safety defaults
 

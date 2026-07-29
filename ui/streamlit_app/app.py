@@ -39,6 +39,18 @@ DEFAULT_TIMEFRAMES = ["1d", "4h", "1h"]
 
 DIRECTION_ICON = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}
 
+PROVIDER_HELP = {
+    "openrouter": (
+        "No models returned. OpenRouter's catalog is public, so this usually means "
+        "the server could not reach openrouter.ai."
+    ),
+    "ollama": (
+        "Ollama is not reachable. Install it from ollama.com, run `ollama serve`, "
+        "then reload this page."
+    ),
+    "anthropic": "No models configured.",
+}
+
 st.set_page_config(page_title="ATP Console", page_icon="📈", layout="wide")
 
 
@@ -88,6 +100,111 @@ def render_assessment(title: str, report: dict[str, Any], key: str = "assessment
     with st.expander(f"{DIRECTION_ICON.get(direction, '⚪')} {title} — {direction}", expanded=True):
         confidence_bar(title, assessment["confidence"])
         render_explanation(assessment)
+
+
+def page_models() -> None:
+    st.header("Models")
+    st.caption(
+        "Which language model the agents use. Anthropic is the highest quality; "
+        "OpenRouter has a free tier; Ollama runs locally at no cost and sends "
+        "nothing off the machine."
+    )
+
+    api = client()
+    try:
+        current = api.models()
+    except ApiError as exc:
+        show_error(exc)
+        api.close()
+        return
+
+    active = current["active"]
+    switching = current["switching_enabled"]
+    columns = st.columns(2)
+    columns[0].metric("Active provider", active["provider"])
+    columns[1].metric("Active model", active["model"])
+    if not switching:
+        st.warning(
+            "Runtime model switching is disabled on the server "
+            "(ATP_LLM__ALLOW_RUNTIME_MODEL_SWITCHING=false)."
+        )
+
+    providers = current["providers"]
+    provider = st.selectbox("Provider", providers, index=providers.index(active["provider"]))
+    free_only = st.checkbox("Free models only", value=provider == "openrouter")
+
+    try:
+        listing = api.models(provider, free_only)
+    except ApiError as exc:
+        show_error(exc)
+        api.close()
+        return
+
+    models = listing["models"]
+    if not models:
+        st.info(PROVIDER_HELP.get(provider, "No models returned by this provider."))
+    else:
+        st.dataframe(
+            [
+                {
+                    "model": model["id"],
+                    "name": model["name"],
+                    "free": model["free"],
+                    "installed": model["installed"],
+                    "context": model["context_length"],
+                }
+                for model in models
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+        choice = st.selectbox("Select a model", [model["id"] for model in models])
+        selected = next(model for model in models if model["id"] == choice)
+        needs_download = selected["installed"] is False
+
+        actions = st.columns(2)
+        if actions[0].button(
+            "Use this model", type="primary", disabled=not switching or needs_download
+        ):
+            try:
+                result = api.select_model(provider, choice)
+                st.success(f"Agents now use {result['provider']} / {result['model']}")
+                st.rerun()
+            except ApiError as exc:
+                show_error(exc)
+        if needs_download:
+            actions[0].caption("Download it first.")
+
+        if provider == "ollama" and actions[1].button("Download", disabled=not needs_download):
+            try:
+                with st.spinner(f"Pulling {choice} - this can take several minutes..."):
+                    pulled = api.pull_model(provider, choice)
+                if pulled["installed"]:
+                    st.success(f"{pulled['model']} is ready to use.")
+                    st.rerun()
+                else:
+                    st.warning(f"Pull finished with status: {pulled.get('detail')}")
+            except ApiError as exc:
+                show_error(exc)
+
+    if provider == "ollama":
+        with st.expander("Download another model"):
+            st.caption(
+                "Any name from ollama.com/library, e.g. `llama3.2:3b` or `qwen2.5:14b`. "
+                "Smaller models are faster but hold to the output schema less reliably."
+            )
+            name = st.text_input("Model name", key="ollama_pull_name").strip()
+            if st.button("Download", key="ollama_pull_button", disabled=not name):
+                try:
+                    with st.spinner(f"Pulling {name} - this can take several minutes..."):
+                        pulled = api.pull_model("ollama", name)
+                    st.success(f"{pulled['model']}: {pulled.get('detail') or 'done'}")
+                    st.rerun()
+                except ApiError as exc:
+                    show_error(exc)
+
+    api.close()
 
 
 def page_analysis() -> None:
@@ -436,6 +553,7 @@ PAGES = {
     "Portfolio": page_portfolio,
     "Trade": page_trade,
     "Memory": page_memory,
+    "Models": page_models,
 }
 
 

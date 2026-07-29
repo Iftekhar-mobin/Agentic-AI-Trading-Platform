@@ -42,6 +42,7 @@ from atp.application.use_cases import (
     RunBacktest,
     SyncMarketData,
 )
+from atp.domain.models.llm import ActiveModel, LLMProvider
 from atp.domain.ports import (
     BacktestEngine,
     BarRepository,
@@ -52,6 +53,7 @@ from atp.domain.ports import (
     IndicatorEngine,
     LLMClient,
     MarketDataProvider,
+    ModelCatalog,
     NewsProvider,
     OrderRepository,
     PortfolioRepository,
@@ -69,7 +71,15 @@ from atp.infrastructure.config import (
 from atp.infrastructure.embeddings import HashingEmbeddingModel
 from atp.infrastructure.fundamentals import YFinanceFundamentalsProvider
 from atp.infrastructure.indicators import PandasIndicatorEngine
-from atp.infrastructure.llm import AnthropicLLMClient
+from atp.infrastructure.llm import (
+    AnthropicLLMClient,
+    AnthropicModelCatalog,
+    LLMRouter,
+    OllamaLLMClient,
+    OllamaModelCatalog,
+    OpenRouterLLMClient,
+    OpenRouterModelCatalog,
+)
 from atp.infrastructure.market_data import (
     ResamplingMarketDataProvider,
     YFinanceMarketDataProvider,
@@ -91,6 +101,8 @@ class Container:
     market_data: MarketDataProvider
     indicator_engine: IndicatorEngine
     llm: LLMClient
+    llm_router: LLMRouter
+    model_catalogs: dict[LLMProvider, ModelCatalog]
     technical_analysis_agent: TechnicalAnalysisAgent
     chart_pattern_agent: ChartPatternAgent
     market_research_agent: MarketResearchAgent
@@ -137,7 +149,12 @@ class Container:
         # from ones it does. Any provider swapped in here inherits that.
         market_data = ResamplingMarketDataProvider(YFinanceMarketDataProvider())
         indicator_engine = PandasIndicatorEngine()
-        llm = AnthropicLLMClient(settings.llm)
+        # Agents hold the router, not a concrete client, so the active model
+        # can change at runtime without rewiring anything downstream.
+        llm_router = LLMRouter(
+            lambda active: cls._build_llm_client(settings, active), settings.llm.active
+        )
+        llm = llm_router
         technical_analysis_agent = TechnicalAnalysisAgent(llm, indicator_engine)
         load_price_history = LoadPriceHistory(bar_repository, market_data)
         load_timeframes = LoadTimeframes(load_price_history)
@@ -197,6 +214,8 @@ class Container:
             market_data=market_data,
             indicator_engine=indicator_engine,
             llm=llm,
+            llm_router=llm_router,
+            model_catalogs=cls._build_model_catalogs(settings),
             technical_analysis_agent=technical_analysis_agent,
             chart_pattern_agent=chart_pattern_agent,
             market_research_agent=market_research_agent,
@@ -244,6 +263,25 @@ class Container:
                 learn_from_context,
             ),
         )
+
+    @staticmethod
+    def _build_llm_client(settings: Settings, active: ActiveModel) -> LLMClient:
+        """Construct the client for one provider/model pair."""
+        if active.provider is LLMProvider.OPENROUTER:
+            return OpenRouterLLMClient(settings.llm, active.model)
+        if active.provider is LLMProvider.OLLAMA:
+            return OllamaLLMClient(settings.llm, active.model)
+        return AnthropicLLMClient(settings.llm, model=active.model)
+
+    @staticmethod
+    def _build_model_catalogs(settings: Settings) -> dict[LLMProvider, ModelCatalog]:
+        """All three catalogs, always. Listing costs nothing until it is called,
+        and an operator comparing backends wants to see every option at once."""
+        return {
+            LLMProvider.ANTHROPIC: AnthropicModelCatalog(),
+            LLMProvider.OPENROUTER: OpenRouterModelCatalog(settings.llm),
+            LLMProvider.OLLAMA: OllamaModelCatalog(settings.llm),
+        }
 
     @staticmethod
     def _build_memory(settings: Settings, embeddings: EmbeddingModel) -> EpisodicMemory:
