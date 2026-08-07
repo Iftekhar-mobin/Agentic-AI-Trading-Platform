@@ -74,7 +74,10 @@ class LLMSettings(BaseModel):
 
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "deepseek/deepseek-chat-v3.1:free"
+    # OpenRouter's free roster turns over — models are added and withdrawn
+    # without notice, so treat this as a starting point, not a guarantee. The
+    # Models page lists what is actually on offer right now.
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1:8b"

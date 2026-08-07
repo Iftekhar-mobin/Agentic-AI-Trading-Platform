@@ -19,6 +19,7 @@ import structlog
 import yfinance
 
 from atp.domain.models.news import NewsArticle
+from atp.infrastructure.vendor_symbols import normalize, to_vendor_symbol
 
 log = structlog.get_logger()
 
@@ -57,9 +58,11 @@ class YFinanceNewsProvider:
         limit: int = 20,
         since: datetime | None = None,
     ) -> tuple[NewsArticle, ...]:
-        symbol = symbol.strip().upper()
+        symbol = normalize(symbol)
         # Over-fetch: the vendor count is pre-filter, and `since` may cut deeply.
-        items = await asyncio.to_thread(self._download, symbol, max(limit * 2, limit))
+        items = await asyncio.to_thread(
+            self._download, to_vendor_symbol(symbol), max(limit * 2, limit)
+        )
         articles = self._to_articles(symbol, items)
         if since is not None:
             articles = tuple(article for article in articles if article.published_at >= since)

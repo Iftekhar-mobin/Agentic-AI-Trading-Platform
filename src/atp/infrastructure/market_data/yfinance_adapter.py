@@ -20,6 +20,7 @@ import yfinance
 from pydantic import ValidationError
 
 from atp.domain.models.market import Bar, BarInterval, PriceHistory
+from atp.infrastructure.vendor_symbols import normalize, to_vendor_symbol
 
 log = structlog.get_logger()
 
@@ -44,9 +45,14 @@ class YFinanceMarketDataProvider:
         start: datetime,
         end: datetime | None = None,
     ) -> PriceHistory:
-        symbol = symbol.strip().upper()
-        frame = await asyncio.to_thread(self._download, symbol, interval, start, end)
-        bars = self._to_bars(symbol, frame)
+        symbol = normalize(symbol)
+        # The vendor ticker is an implementation detail of this adapter: the
+        # history keeps the symbol the caller asked for, so reports read XAUUSD.
+        vendor = to_vendor_symbol(symbol)
+        if vendor != symbol:
+            log.debug("market_data.symbol_translated", symbol=symbol, vendor_symbol=vendor)
+        frame = await asyncio.to_thread(self._download, vendor, interval, start, end)
+        bars = self._to_bars(vendor, frame)
         return PriceHistory(symbol=symbol, interval=interval, bars=bars)
 
     @staticmethod

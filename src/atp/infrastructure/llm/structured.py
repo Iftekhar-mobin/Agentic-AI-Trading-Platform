@@ -12,8 +12,13 @@ So the schema is enforced three ways, weakest last:
 3. this module, which extracts and validates whatever came back.
 
 Step 3 is the one that actually guarantees the contract. Anything that fails
-validation raises ``LLMGenerationError``, so a sloppy model degrades into a
+validation raises ``SchemaViolationError``, so a sloppy model degrades into a
 recorded agent failure rather than a malformed report reaching a trader.
+
+A failure at step 3 is not always terminal, though. Models that drop one
+required field usually supply it when told exactly which field and why, so the
+error carries enough detail for a caller to ask for a correction — see
+``repair_prompt``. Adapters decide whether to spend that second call.
 """
 
 from __future__ import annotations
@@ -27,6 +32,38 @@ from pydantic import BaseModel, ValidationError
 from atp.domain.errors import LLMGenerationError
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+class SchemaViolationError(LLMGenerationError):
+    """A response that did not satisfy the requested schema.
+
+    Subclasses ``LLMGenerationError`` so existing handling is unchanged: the
+    orchestrator still records a failed agent. ``detail`` is the extra material
+    an adapter needs to ask the model to correct itself.
+    """
+
+    def __init__(self, message: str, *, response: str, detail: str) -> None:
+        super().__init__(message)
+        self.response = response
+        """The raw completion, replayed to the model as its own prior turn."""
+        self.detail = detail
+        """What was wrong, phrased for the model rather than for a log reader."""
+
+
+def repair_prompt[T: BaseModel](response_model: type[T], detail: str) -> str:
+    """A corrective follow-up naming exactly what was wrong.
+
+    Worth one extra call: the common free-model failure is a single omitted
+    field, and quoting the specific error fixes it far more often than simply
+    restating the schema — which the model has already seen and ignored once.
+    """
+    return (
+        f"That response did not validate against {response_model.__name__}:\n\n"
+        f"{detail}\n\n"
+        "Return the corrected JSON object, complete and on its own. Every "
+        "required field must be present - do not omit evidence or "
+        "invalidation_conditions. No prose, no markdown fence."
+    )
 
 
 def schema_instructions[T: BaseModel](response_model: type[T]) -> str:
@@ -65,7 +102,8 @@ def parse_structured[T: BaseModel](response_model: type[T], text: str, *, model:
     except json.JSONDecodeError as exc:
         preview = payload[:200].replace("\n", " ")
         msg = f"model '{model}' did not return JSON ({exc}); got: {preview}"
-        raise LLMGenerationError(msg) from exc
+        detail = f"The output was not valid JSON: {exc}"
+        raise SchemaViolationError(msg, response=text, detail=detail) from exc
 
     try:
         return response_model.model_validate(data)
@@ -76,4 +114,20 @@ def parse_structured[T: BaseModel](response_model: type[T], text: str, *, model:
             "Smaller models often omit required fields such as evidence or "
             "invalidation_conditions."
         )
-        raise LLMGenerationError(msg) from exc
+        raise SchemaViolationError(msg, response=text, detail=_violations(exc)) from exc
+
+
+def _violations(exc: ValidationError) -> str:
+    """Pydantic's errors as a short bulleted list the model can act on.
+
+    Truncated: a model that produced twenty errors will not be rescued by
+    reading all twenty, and the prompt still has an agent's context in it.
+    """
+    lines = [
+        f"- {'.'.join(str(part) for part in error['loc']) or '(root)'}: {error['msg']}"
+        for error in exc.errors()[:10]
+    ]
+    remaining = exc.error_count() - len(lines)
+    if remaining > 0:
+        lines.append(f"- ...and {remaining} more")
+    return "\n".join(lines)

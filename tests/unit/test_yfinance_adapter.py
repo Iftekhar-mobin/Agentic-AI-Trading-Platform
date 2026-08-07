@@ -60,6 +60,20 @@ async def test_normalizes_vendor_frame_to_domain_bars(fake_download: dict[str, A
     assert all(bar.timestamp.tzinfo == UTC for bar in history.bars)
 
 
+async def test_downloads_vendor_ticker_but_reports_the_symbol_asked_for(
+    fake_download: dict[str, Any],
+) -> None:
+    """Gold is fetched as GC=F; the history still says XAUUSD, because that is
+    what the caller asked about and what every downstream report will show."""
+    provider = YFinanceMarketDataProvider()
+    history = await provider.get_bars(
+        "xauusd", BarInterval.DAY_1, start=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    assert fake_download["tickers"] == "GC=F"
+    assert history.symbol == "XAUUSD"
+
+
 async def test_handles_flat_columns_and_empty_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

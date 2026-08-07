@@ -12,6 +12,11 @@ adapter therefore leans on ``structured`` to enforce the contract rather than
 trusting ``response_format``, and translates every failure into
 ``LLMGenerationError`` so a weak model surfaces as a recorded agent failure.
 
+Because that failure mode is common here rather than exceptional, a schema
+violation buys one corrective round-trip quoting the exact validation errors
+before the agent is failed. The Ollama adapter has no equivalent: it constrains
+decoding with the schema itself, so it rarely needs a second chance.
+
 Talks HTTP directly rather than pulling in the OpenAI SDK: the surface used
 here is one endpoint, and httpx is already a dependency.
 """
@@ -25,7 +30,12 @@ import structlog
 from pydantic import BaseModel
 
 from atp.domain.errors import LLMGenerationError
-from atp.infrastructure.llm.structured import parse_structured, schema_instructions
+from atp.infrastructure.llm.structured import (
+    SchemaViolationError,
+    parse_structured,
+    repair_prompt,
+    schema_instructions,
+)
 
 if TYPE_CHECKING:
     from atp.infrastructure.config.settings import LLMSettings
@@ -82,12 +92,43 @@ class OpenRouterLLMClient:
         system: str,
         prompt: str,
     ) -> T:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": f"{system}\n\n{schema_instructions(response_model)}"},
+            {"role": "user", "content": prompt},
+        ]
+
+        content = await self._complete(messages, response_model)
+        try:
+            return parse_structured(response_model, content, model=self._model)
+        except SchemaViolationError as exc:
+            log.warning(
+                "llm.schema_repair",
+                provider="openrouter",
+                model=self._model,
+                response_model=response_model.__name__,
+                detail=exc.detail,
+            )
+            messages += [
+                {"role": "assistant", "content": exc.response},
+                {"role": "user", "content": repair_prompt(response_model, exc.detail)},
+            ]
+
+        # Exactly one corrective attempt. Free models frequently drop a field on
+        # the first pass and supply it when told which; a model that misses
+        # twice is not going to converge, and each retry is real latency on a
+        # rate-limited quota.
+        content = await self._complete(messages, response_model)
+        return parse_structured(response_model, content, model=self._model)
+
+    async def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        response_model: type[T],
+    ) -> str:
+        """One chat completion, returned as raw text for the caller to validate."""
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": f"{system}\n\n{schema_instructions(response_model)}"},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "max_tokens": self._settings.max_tokens,
             # Honoured where supported and ignored elsewhere; the real guarantee
             # is validation on the way out.
@@ -130,7 +171,7 @@ class OpenRouterLLMClient:
             input_tokens=usage.get("prompt_tokens"),
             output_tokens=usage.get("completion_tokens"),
         )
-        return parse_structured(response_model, content, model=self._model)
+        return str(content)
 
     async def aclose(self) -> None:
         if self._client is not None:

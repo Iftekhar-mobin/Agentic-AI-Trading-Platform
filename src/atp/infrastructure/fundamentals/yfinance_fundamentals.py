@@ -20,6 +20,7 @@ import structlog
 import yfinance
 
 from atp.domain.models.fundamentals import Fundamentals
+from atp.infrastructure.vendor_symbols import normalize, to_vendor_symbol
 
 log = structlog.get_logger()
 
@@ -49,8 +50,8 @@ def _text(info: dict[str, Any], key: str) -> str | None:
 
 class YFinanceFundamentalsProvider:
     async def get_fundamentals(self, symbol: str) -> Fundamentals:
-        symbol = symbol.strip().upper()
-        info = await asyncio.to_thread(self._download, symbol)
+        symbol = normalize(symbol)
+        info = await asyncio.to_thread(self._download, to_vendor_symbol(symbol))
         return self._to_snapshot(symbol, info)
 
     @staticmethod

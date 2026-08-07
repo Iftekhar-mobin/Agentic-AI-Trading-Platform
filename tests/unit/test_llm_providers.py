@@ -145,6 +145,43 @@ async def test_openrouter_fenced_output_still_validates() -> None:
     assert answer.verdict == "sell"
 
 
+async def test_openrouter_repairs_a_schema_violation_on_a_second_call() -> None:
+    """The common free-model failure - one dropped field - is worth one retry."""
+    requests: list[dict[str, Any]] = []
+    replies = iter(['{"verdict": "buy"}', '{"verdict": "buy", "score": 0.7}'])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": next(replies)}}]})
+
+    client = OpenRouterLLMClient(settings(), "free/model:free", client=transport(handler))
+    answer = await client.generate_structured(Answer, system="s", prompt="p")
+
+    assert answer.score == 0.7
+    assert len(requests) == 2
+    # The retry replays the bad answer and names the field that was missing,
+    # rather than just asking again and hoping.
+    correction = requests[1]["messages"]
+    assert correction[2] == {"role": "assistant", "content": '{"verdict": "buy"}'}
+    assert "score" in correction[3]["content"]
+    assert "Field required" in correction[3]["content"]
+
+
+async def test_openrouter_gives_up_after_one_repair() -> None:
+    """A model that cannot hold the schema twice is a recorded agent failure,
+    not an unbounded retry loop on a rate-limited quota."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"verdict": "b"}'}}]})
+
+    client = OpenRouterLLMClient(settings(), "free/model:free", client=transport(handler))
+    with pytest.raises(LLMGenerationError, match="does not match Answer"):
+        await client.generate_structured(Answer, system="s", prompt="p")
+    assert len(requests) == 2
+
+
 async def test_openrouter_rate_limit_explains_the_free_tier() -> None:
     client = OpenRouterLLMClient(
         settings(), "free/model:free", client=transport(openrouter_reply("slow down", status=429))

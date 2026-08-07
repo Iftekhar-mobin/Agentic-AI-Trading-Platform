@@ -5,6 +5,9 @@ specialist agents that research markets, generate and backtest strategies, manag
 risk, execute trades, and learn from outcomes — with every recommendation fully
 explainable.
 
+**New here?** [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — setup on a free
+LLM tier, how to run it, and what happens between a question and an answer.
+
 **Architecture and roadmap:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Prerequisites
@@ -86,6 +89,25 @@ CI (GitHub Actions) runs format check, lint, mypy, and tests on every push/PR.
 The first six run concurrently; `continuous_learning` runs after them, because it
 reflects on what they concluded. An agent that fails is reported in `failures`; the
 others still return their work.
+
+### Symbols
+
+Equity tickers work as typed. Yahoo does not serve spot metals or FX under the
+names traders use, so those are translated at the vendor boundary — the domain
+keeps the symbol you asked for, and reports still say `XAUUSD`:
+
+| You type | Fetched as | | You type | Fetched as |
+|---|---|---|---|---|
+| `XAUUSD` | `GC=F` (gold future) | | `EURUSD` | `EURUSD=X` |
+| `XAGUSD` | `SI=F` | | `BTCUSD` | `BTC-USD` |
+
+Metals resolve to the front-month future, not spot: immaterial for trend and
+structure, material for anything settling against a spot fix. Unrecognized
+symbols pass through untouched. See `src/atp/infrastructure/vendor_symbols.py`
+and [GETTING_STARTED §5](docs/GETTING_STARTED.md#5-symbols).
+
+Commodities and FX have no equity fundamentals, so `fundamental_analysis`
+correctly reports insufficient data for them — skip it with `-a`.
 
 ### Multi-timeframe analysis
 
@@ -173,9 +195,14 @@ Switching at runtime needs the `admin` scope, and can be turned off entirely wit
 **The trade-off is schema adherence.** Every agent output must carry reasoning,
 calibrated confidence, cited evidence and invalidation conditions. Anthropic and
 Ollama enforce that during decoding; free OpenRouter models often do not, so
-responses are validated on arrival and a model that cannot comply surfaces as a
-recorded agent failure rather than a half-filled report. Smaller local models
-(under ~7B) fail this often enough to be frustrating.
+responses are validated on arrival. When one fails validation the OpenRouter
+adapter spends exactly one corrective round-trip quoting the precise errors
+(logged as `llm.schema_repair`); a model that misses twice surfaces as a recorded
+agent failure rather than a half-filled report. Free models under ~100B and local
+models under ~7B fail this often enough to be frustrating.
+
+OpenRouter's free roster changes without notice — check the Models page for what
+is currently live rather than trusting a hard-coded default.
 
 ## Safety defaults
 
