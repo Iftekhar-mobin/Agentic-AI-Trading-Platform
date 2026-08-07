@@ -34,7 +34,9 @@ what guarantees the router terminates.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -43,7 +45,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
 from atp.application.orchestration.situation import render_situation
-from atp.application.orchestration.state import AgentFailure, TradingState
+from atp.application.orchestration.state import AgentFailure, AgentStep, TradingState
 from atp.application.use_cases.analyze_chart_patterns import AnalyzeChartPatterns
 from atp.application.use_cases.analyze_fundamentals import AnalyzeFundamentals
 from atp.application.use_cases.analyze_market_research import AnalyzeMarketResearch
@@ -276,7 +278,26 @@ class TradingOrchestrator:
         state: TradingState,
         run: Callable[[], Awaitable[BaseModel]],
     ) -> dict[str, Any]:
-        """Run one agent, converting a domain failure into recorded state."""
+        """Run one agent, converting a domain failure into recorded state.
+
+        Every outcome, success or failure, also appends an ``AgentStep`` so the
+        caller can reconstruct how the run unfolded rather than only what it
+        produced.
+        """
+        phase = "feedback" if agent in FEEDBACK_AGENTS else "analysis"
+        started_at = datetime.now(UTC)
+        started = time.perf_counter()
+
+        def step(status: str, detail: str) -> AgentStep:
+            return AgentStep(
+                agent=agent,
+                phase=phase,
+                status=status,
+                started_at=started_at,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                detail=detail,
+            )
+
         try:
             report = await run()
         except DomainError as exc:
@@ -284,5 +305,33 @@ class TradingOrchestrator:
             return {
                 "completed": [agent],
                 "failures": [AgentFailure(agent=agent, error=str(exc))],
+                "steps": [step("failed", str(exc))],
             }
-        return {_ARTIFACT_FIELDS[agent]: report, "completed": [agent]}
+        return {
+            _ARTIFACT_FIELDS[agent]: report,
+            "completed": [agent],
+            "steps": [step("ok", _summarize(report))],
+        }
+
+
+def _summarize(report: BaseModel) -> str:
+    """A one-line account of what an agent concluded.
+
+    Reads the explanation envelope every agent report carries, rather than
+    special-casing seven report types — a new agent is summarized correctly the
+    day it is added.
+    """
+    assessment = getattr(report, "assessment", None) or getattr(report, "entry", None)
+    if assessment is None:
+        return type(report).__name__
+    direction = getattr(assessment, "direction", None)
+    confidence = getattr(assessment, "confidence", None)
+    parts = []
+    if direction is not None:
+        parts.append(str(getattr(direction, "value", direction)))
+    if isinstance(confidence, int | float):
+        parts.append(f"{confidence:.0%} confidence")
+    evidence = getattr(assessment, "evidence", None)
+    if evidence is not None:
+        parts.append(f"{len(evidence)} pieces of evidence")
+    return ", ".join(parts) or type(report).__name__

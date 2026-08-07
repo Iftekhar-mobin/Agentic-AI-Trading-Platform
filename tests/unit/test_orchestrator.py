@@ -252,6 +252,42 @@ async def test_total_failure_leaves_no_report() -> None:
     assert len(state.failures) == len(ANALYSIS_AGENTS)
 
 
+async def test_every_agent_records_an_execution_step() -> None:
+    """The trace is what the Processing panel renders; it must cover the run."""
+    state = await Stubs().orchestrator().run("AAPL")
+
+    assert sorted(step.agent for step in state.steps) == sorted(ALL_AGENTS)
+    assert all(step.status == "ok" for step in state.steps)
+    assert all(step.duration_ms >= 0 for step in state.steps)
+    # The two phases are labelled, so the panel can explain why timings overlap.
+    phases = {step.agent: step.phase for step in state.steps}
+    assert phases["technical_analysis"] == "analysis"
+    assert phases["continuous_learning"] == "feedback"
+    # Learning cannot start before the analysis pool has finished.
+    learning = next(step for step in state.steps if step.agent == "continuous_learning")
+    technical = next(step for step in state.steps if step.agent == "technical_analysis")
+    assert learning.started_at >= technical.started_at
+
+
+async def test_a_failed_agent_is_traced_with_its_error() -> None:
+    stubs = Stubs(technical=InsufficientHistoryError("only 3 bars"))
+    state = await stubs.orchestrator().run("AAPL")
+
+    step = next(step for step in state.steps if step.agent == "technical_analysis")
+    assert step.status == "failed"
+    assert "3 bars" in step.detail
+    # Everything else still reports success.
+    assert all(other.status == "ok" for other in state.steps if other.agent != step.agent)
+
+
+async def test_a_successful_step_summarizes_what_was_concluded() -> None:
+    state = await Stubs().orchestrator().run("AAPL")
+
+    step = next(step for step in state.steps if step.agent == "technical_analysis")
+    assert "bullish" in step.detail
+    assert "confidence" in step.detail
+
+
 def test_resolve_agents_normalizes_and_orders() -> None:
     assert resolve_agents(None) == ALL_AGENTS
     assert resolve_agents([]) == ALL_AGENTS

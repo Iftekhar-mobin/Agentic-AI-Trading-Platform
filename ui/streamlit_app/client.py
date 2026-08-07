@@ -9,11 +9,15 @@ endpoints when it replaces this.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+MAX_BODY_CHARS = 20_000
+"""Exchanges are held in session state and rendered; an unbounded analysis
+response would bloat both."""
 ANALYSIS_TIMEOUT = 300.0
 """Analysis runs several LLM calls; the default 5s timeout would always lose."""
 
@@ -33,27 +37,57 @@ class ApiError(RuntimeError):
 
 
 class AtpClient:
+    """An API client that also keeps a record of what it sent and received.
+
+    The Processing panel is built from ``exchanges``: capturing traffic here,
+    at the one place every call already passes through, means no endpoint
+    method has to remember to report itself.
+    """
+
     def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str = "") -> None:
         self._base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(base_url=self._base_url, headers=headers, timeout=30.0)
+        self.exchanges: list[dict[str, Any]] = []
+        """Every HTTP call this client made, oldest first."""
 
     def close(self) -> None:
         self._client.close()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        exchange: dict[str, Any] = {
+            "method": method,
+            "url": f"{self._base_url}{path}",
+            "request": kwargs.get("json") or kwargs.get("params") or {},
+            "timeout_s": kwargs.get("timeout"),
+        }
+        self.exchanges.append(exchange)
+        started = time.perf_counter()
+
         try:
             response = self._client.request(method, path, **kwargs)
         except httpx.RequestError as exc:
+            exchange["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            exchange["status"] = 0
+            exchange["error"] = str(exc)
             raise ApiError(0, f"cannot reach the API at {self._base_url}: {exc}") from exc
 
+        exchange["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        exchange["status"] = response.status_code
+        exchange["request_id"] = response.headers.get("X-Request-ID", "")
+        exchange["bytes"] = len(response.content)
+
         if response.status_code >= 400:
+            exchange["error"] = _detail(response)
             raise ApiError(
                 response.status_code,
                 _detail(response),
                 response.headers.get("X-Request-ID", ""),
             )
-        return response.json()
+
+        body = response.json()
+        exchange["response"] = body
+        return body
 
     def health(self) -> dict[str, Any]:
         return dict(self._request("GET", "/health"))

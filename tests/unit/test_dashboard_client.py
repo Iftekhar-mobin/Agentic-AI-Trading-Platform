@@ -54,6 +54,53 @@ def test_analysis_sends_the_selected_timeframes_and_agents() -> None:
     }
 
 
+def test_every_call_is_recorded_for_the_processing_panel() -> None:
+    """The panel is only as good as what the client bothered to record."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True}, headers={"X-Request-ID": "abc-123"})
+
+    api = make_client(handler)
+    api.analyze("XAUUSD", ["1d"], ["technical_analysis"])
+
+    assert len(api.exchanges) == 1
+    exchange = api.exchanges[0]
+    assert exchange["method"] == "POST"
+    assert exchange["url"].endswith("/analysis")
+    assert exchange["request"]["symbol"] == "XAUUSD"
+    assert exchange["response"] == {"ok": True}
+    assert exchange["status"] == 200
+    assert exchange["request_id"] == "abc-123"
+    assert exchange["duration_ms"] >= 0
+
+
+def test_a_failed_call_is_still_recorded() -> None:
+    """A run that breaks is exactly when someone opens the panel."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json={"detail": {"message": "no report"}})
+
+    api = make_client(handler)
+    with pytest.raises(ApiError):
+        api.analyze("XAUUSD")
+
+    assert len(api.exchanges) == 1
+    assert api.exchanges[0]["status"] == 502
+    assert api.exchanges[0]["error"] == "no report"
+
+
+def test_an_unreachable_api_records_the_transport_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    api = make_client(handler)
+    with pytest.raises(ApiError):
+        api.health()
+
+    assert api.exchanges[0]["status"] == 0
+    assert "connection refused" in api.exchanges[0]["error"]
+
+
 def test_memory_omits_an_empty_query() -> None:
     seen: dict[str, str] = {}
 

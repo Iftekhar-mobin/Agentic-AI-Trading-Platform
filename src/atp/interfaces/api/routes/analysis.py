@@ -6,16 +6,20 @@ fetches, vendor calls and one LLM round-trip per agent.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from atp.application.orchestration import (
     ALL_AGENTS,
+    AgentStep,
     TradingOrchestrator,
     UnknownAgentError,
 )
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.fundamentals import FundamentalReport
+from atp.domain.models.llm import ActiveModel
 from atp.domain.models.market import BarInterval
 from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
@@ -59,6 +63,15 @@ class AnalysisResponse(BaseModel):
     requested_agents: list[str]
     completed_agents: list[str]
     failures: list[AgentFailureSchema] = Field(default_factory=list)
+    steps: list[AgentStep] = Field(
+        default_factory=list,
+        description="Execution trace: which agents ran, in what order, and for how long",
+    )
+    active_model: ActiveModel | None = Field(
+        default=None,
+        description="The provider and model that produced this reasoning",
+    )
+    duration_ms: float = Field(default=0.0, description="Total wall-clock time for the run")
     technical_report: TechnicalReport | None = None
     chart_pattern_report: ChartPatternReport | None = None
     market_research_report: MarketResearchReport | None = None
@@ -75,10 +88,12 @@ def _orchestrator(request: Request) -> TradingOrchestrator:
 @router.post("/analysis", response_model=AnalysisResponse)
 async def run_analysis(request: AnalysisRequest, http_request: Request) -> AnalysisResponse:
     orchestrator = _orchestrator(http_request)
+    started = time.perf_counter()
     try:
         state = await orchestrator.run(request.symbol, request.intervals, agents=request.agents)
     except UnknownAgentError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
 
     failures = [AgentFailureSchema(agent=f.agent, error=f.error) for f in state.failures]
     if not state.has_report:
@@ -96,6 +111,10 @@ async def run_analysis(request: AnalysisRequest, http_request: Request) -> Analy
         requested_agents=list(state.requested_agents),
         completed_agents=state.completed,
         failures=failures,
+        # Chronological, so the two phases read in the order they happened.
+        steps=sorted(state.steps, key=lambda step: step.started_at),
+        active_model=http_request.app.state.container.llm_router.active,
+        duration_ms=duration_ms,
         technical_report=state.technical_report,
         chart_pattern_report=state.chart_pattern_report,
         market_research_report=state.market_research_report,

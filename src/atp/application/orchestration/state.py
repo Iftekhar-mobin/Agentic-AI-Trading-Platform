@@ -9,7 +9,8 @@ concurrently, can append without overwriting each other.
 from __future__ import annotations
 
 import operator
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,28 @@ class AgentFailure(BaseModel):
 
     agent: str
     error: str
+
+
+class AgentStep(BaseModel):
+    """One agent's execution, recorded so a caller can see how the work was done.
+
+    ``failures`` says what went wrong; this says what happened at all — which
+    agents ran, in what order, how long each took, and what it concluded. That
+    is the difference between "the news agent failed" and "the news agent was
+    dispatched in phase one, took 31s, and timed out against the vendor", and it
+    is what makes a slow or partial run diagnosable from the outside.
+
+    Timings are wall-clock and the analysis agents run concurrently, so the
+    durations overlap and will not sum to the total.
+    """
+
+    agent: str
+    phase: Literal["analysis", "feedback"]
+    status: Literal["ok", "failed"]
+    started_at: datetime
+    duration_ms: float
+    detail: str = ""
+    """What it concluded, or why it failed."""
 
 
 class TradingState(BaseModel):
@@ -57,6 +80,10 @@ class TradingState(BaseModel):
     # Bookkeeping
     completed: Annotated[list[str], operator.add] = Field(default_factory=list)
     failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
+    steps: Annotated[list[AgentStep], operator.add] = Field(
+        default_factory=list,
+        description="Execution trace: what ran, in what order, and for how long",
+    )
 
     @property
     def interval(self) -> BarInterval:

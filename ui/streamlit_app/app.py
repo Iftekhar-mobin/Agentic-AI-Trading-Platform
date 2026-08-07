@@ -13,6 +13,7 @@ Run it with the API already serving:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,25 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from client import DEFAULT_BASE_URL, ApiError, AtpClient
+from client import DEFAULT_BASE_URL, MAX_BODY_CHARS, ApiError, AtpClient
+
+
+def _fill_width() -> dict[str, Any]:
+    """Kwargs telling a table to fill its container, across Streamlit versions.
+
+    1.51 replaced ``use_container_width=True`` with ``width="stretch"``, and
+    passing the new form to an older build raises ``TypeError`` at render time.
+    The dashboard is routinely launched with whatever Streamlit is on the path
+    rather than the project's pinned one, so it supports both.
+    """
+    try:
+        major, minor = (int(part) for part in st.__version__.split(".")[:2])
+    except ValueError:  # a dev build like "1.60.0.dev0" - assume current
+        return {"width": "stretch"}
+    return {"width": "stretch"} if (major, minor) >= (1, 51) else {"use_container_width": True}
+
+
+FILL_WIDTH = _fill_width()
 
 AGENTS = [
     "technical_analysis",
@@ -102,6 +121,133 @@ def render_assessment(title: str, report: dict[str, Any], key: str = "assessment
         render_explanation(assessment)
 
 
+STATUS_ICON = {"ok": "✅", "failed": "❌"}
+
+
+def _duration_bar(duration_ms: float, longest: float, width: int = 18) -> str:
+    """A proportional bar, so the expensive step is obvious at a glance."""
+    if longest <= 0:
+        return ""
+    filled = max(1, round(width * duration_ms / longest))
+    return "█" * filled
+
+
+def record_processing(api: AtpClient, result: dict[str, Any] | None = None) -> None:
+    """Stash what a call did, so the panel survives Streamlit's reruns.
+
+    Streamlit re-executes the whole script on every interaction; without this
+    the trace would vanish the moment you expanded a section to read it.
+    """
+    st.session_state["processing"] = {
+        "exchanges": list(api.exchanges),
+        "result": result,
+    }
+
+
+def render_processing() -> None:
+    """The Processing panel: what was asked, what ran, and what came back.
+
+    Deliberately shows the mechanism rather than a tidy summary. When a run is
+    slow, partial, or surprising, this is the page that says why — which agent
+    burned the time, which one failed and with what error, which model produced
+    the reasoning, and the exact JSON that crossed the wire.
+    """
+    trace = st.session_state.get("processing")
+    if not trace:
+        st.caption("Run an analysis to see how the work was done.")
+        return
+
+    exchanges: list[dict[str, Any]] = trace.get("exchanges") or []
+    result: dict[str, Any] = trace.get("result") or {}
+    steps: list[dict[str, Any]] = result.get("steps") or []
+
+    # --- What the run cost -------------------------------------------------
+    model = result.get("active_model") or {}
+    failed = [step for step in steps if step["status"] == "failed"]
+    columns = st.columns(4)
+    columns[0].metric("Total time", f"{result.get('duration_ms', 0) / 1000:.1f}s")
+    columns[1].metric("Agents run", len(steps))
+    columns[2].metric("Failed", len(failed), delta=None if not failed else f"-{len(failed)}")
+    columns[3].metric("Model", model.get("model", "—").split("/")[-1] or "—")
+    if model:
+        st.caption(f"Reasoning produced by **{model.get('provider')} / {model.get('model')}**")
+
+    # --- Which agent did what ---------------------------------------------
+    if steps:
+        st.subheader("Agent timeline")
+        st.caption(
+            "The analysis agents are dispatched together in one superstep, so their "
+            "durations overlap and will not sum to the total. `continuous_learning` "
+            "runs afterwards, because it reflects on what the others concluded."
+        )
+        longest = max(step["duration_ms"] for step in steps)
+        st.dataframe(
+            [
+                {
+                    "": STATUS_ICON.get(step["status"], "•"),
+                    "agent": step["agent"],
+                    "phase": step["phase"],
+                    "seconds": round(step["duration_ms"] / 1000, 2),
+                    "time": _duration_bar(step["duration_ms"], longest),
+                    "outcome": step["detail"],
+                }
+                for step in steps
+            ],
+            **FILL_WIDTH,
+            hide_index=True,
+        )
+        for step in failed:
+            st.warning(
+                f"**{step['agent']}** failed after "
+                f"{step['duration_ms'] / 1000:.1f}s — {step['detail']}"
+            )
+
+    # --- What crossed the wire --------------------------------------------
+    st.subheader("API calls")
+    if not exchanges:
+        st.caption("No requests recorded.")
+    for index, exchange in enumerate(exchanges, start=1):
+        status = exchange.get("status", 0)
+        icon = "✅" if 200 <= status < 300 else "❌"
+        label = (
+            f"{icon} {index}. {exchange['method']} {exchange['url']} → "
+            f"{status or 'no response'} · {exchange.get('duration_ms', 0) / 1000:.2f}s"
+        )
+        with st.expander(label):
+            meta = st.columns(3)
+            meta[0].metric("Status", status or "—")
+            meta[1].metric("Duration", f"{exchange.get('duration_ms', 0) / 1000:.2f}s")
+            meta[2].metric("Response size", f"{exchange.get('bytes', 0):,} B")
+            if request_id := exchange.get("request_id"):
+                st.caption(
+                    f"`X-Request-ID: {request_id}` — every server log line for this "
+                    "call carries the same id."
+                )
+            if error := exchange.get("error"):
+                st.error(error)
+
+            st.markdown("**Request sent**")
+            st.json(exchange.get("request") or {}, expanded=True)
+
+            if "response" in exchange:
+                st.markdown("**Response received**")
+                body = json.dumps(exchange["response"], indent=2, default=str)
+                if len(body) > MAX_BODY_CHARS:
+                    st.caption(f"Truncated to {MAX_BODY_CHARS:,} of {len(body):,} characters.")
+                    st.code(body[:MAX_BODY_CHARS] + "\n...", language="json")
+                else:
+                    st.json(exchange["response"], expanded=False)
+
+
+def page_processing() -> None:
+    st.header("Processing")
+    st.caption(
+        "How the last run was actually carried out — the request, the agents "
+        "dispatched, their timings and outcomes, and the raw response."
+    )
+    render_processing()
+
+
 def page_models() -> None:
     st.header("Models")
     st.caption(
@@ -155,7 +301,7 @@ def page_models() -> None:
                 }
                 for model in models
             ],
-            width="stretch",
+            **FILL_WIDTH,
             hide_index=True,
         )
 
@@ -228,6 +374,9 @@ def page_analysis() -> None:
 
     if not submitted:
         st.caption("Each run costs one LLM call per selected agent.")
+        if st.session_state.get("processing"):
+            with st.expander("⚙️ Processing — how the last run was done"):
+                render_processing()
         return
     if not symbol:
         st.warning("Enter a symbol.")
@@ -242,15 +391,21 @@ def page_analysis() -> None:
         with st.spinner(f"Running {len(agents)} agents on {symbol} across {selected}..."):
             result = api.analyze(symbol, intervals, agents)
     except ApiError as exc:
+        record_processing(api)
         show_error(exc)
         return
     finally:
         api.close()
 
+    record_processing(api, result)
+
     for failure in result.get("failures", []):
         st.warning(f"**{failure['agent']}** did not complete: {failure['error']}")
 
     st.caption("Timeframes analysed: " + ", ".join(result.get("intervals", [])))
+
+    with st.expander("⚙️ Processing — how this run was done", expanded=False):
+        render_processing()
 
     if technical := result.get("technical_report"):
         render_assessment("Technical", technical)
@@ -267,7 +422,7 @@ def page_analysis() -> None:
                         }
                         for reading in frame["readings"]
                     ],
-                    width="stretch",
+                    **FILL_WIDTH,
                     hide_index=True,
                 )
 
@@ -293,7 +448,7 @@ def page_analysis() -> None:
                             }
                             for pattern in frame["patterns"]
                         ],
-                        width="stretch",
+                        **FILL_WIDTH,
                         hide_index=True,
                     )
                 else:
@@ -309,7 +464,7 @@ def page_analysis() -> None:
                             }
                             for level in frame["levels"]
                         ],
-                        width="stretch",
+                        **FILL_WIDTH,
                         hide_index=True,
                     )
 
@@ -325,7 +480,7 @@ def page_analysis() -> None:
                     }
                     for reading in research["readings"]
                 ],
-                width="stretch",
+                **FILL_WIDTH,
                 hide_index=True,
             )
 
@@ -342,7 +497,7 @@ def page_analysis() -> None:
                     }
                     for reading in fundamental["readings"]
                 ],
-                width="stretch",
+                **FILL_WIDTH,
                 hide_index=True,
             )
 
@@ -418,7 +573,7 @@ def page_portfolio() -> None:
                 }
                 for position in positions
             ],
-            width="stretch",
+            **FILL_WIDTH,
             hide_index=True,
         )
     else:
@@ -440,7 +595,7 @@ def page_portfolio() -> None:
                 }
                 for record in reversed(records)
             ],
-            width="stretch",
+            **FILL_WIDTH,
             hide_index=True,
         )
     else:
@@ -550,6 +705,7 @@ def page_memory() -> None:
 
 PAGES = {
     "Analysis": page_analysis,
+    "Processing": page_processing,
     "Portfolio": page_portfolio,
     "Trade": page_trade,
     "Memory": page_memory,
