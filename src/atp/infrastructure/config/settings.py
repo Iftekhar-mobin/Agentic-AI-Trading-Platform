@@ -18,6 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from atp.domain.models.llm import ActiveModel as ActiveModel
 from atp.domain.models.llm import LLMProvider as LLMProvider
 from atp.domain.models.trading import RiskLimits
+from atp.domain.models.voting import VotingPolicy
 
 
 class Environment(StrEnum):
@@ -146,6 +147,11 @@ class Scope(StrEnum):
 
     READ = "read"
     TRADE = "trade"
+    SIGNAL = "signal"
+    """Publish an external bot's opinion. Deliberately separate from ``trade``:
+    a bot should be able to influence a decision without being able to execute
+    one, and its key is the credential most likely to sit on a remote box."""
+
     ADMIN = "admin"
     """Change platform configuration - today, which language model agents use."""
 
@@ -238,6 +244,47 @@ class ExecutionSettings(BaseModel):
     slippage_bps: float = Field(default=5.0, ge=0, le=100)
 
 
+class VotingSettings(BaseModel):
+    """Consensus settings (env: ``ATP_VOTING__*``).
+
+    Governs how agent opinions and external bot signals combine into one
+    verdict. The defaults are deliberately conservative: a majority that is
+    merely leaning should not open a position.
+    """
+
+    threshold: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Minimum |score| to act; below this the verdict is hold",
+    )
+    min_voters: int = Field(default=3, ge=1, description="Quorum for any non-hold verdict")
+    require_bot_signal: bool = Field(
+        default=False,
+        description="Whether a fresh bot signal is mandatory before agents may act",
+    )
+    signal_ttl_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="How long a stored bot signal stays eligible to vote",
+    )
+    expected_bot: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Name of the bot that should be voting, e.g. 'sniper_bot'. "
+        "Naming it is what lets the platform report it as unavailable rather "
+        "than quietly deciding without it.",
+    )
+
+    @property
+    def policy(self) -> VotingPolicy:
+        return VotingPolicy(
+            threshold=self.threshold,
+            min_voters=self.min_voters,
+            require_bot_signal=self.require_bot_signal,
+        )
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings (env: ``ATP_REDIS__*``)."""
 
@@ -273,6 +320,7 @@ class Settings(BaseSettings):
     # risk engine; nothing downstream can loosen them at runtime.
     risk: RiskLimits = Field(default_factory=RiskLimits)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    voting: VotingSettings = Field(default_factory=VotingSettings)
     news: NewsSettings = Field(default_factory=NewsSettings)
     sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)

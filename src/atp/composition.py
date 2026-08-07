@@ -21,7 +21,7 @@ from atp.application.agents import (
     SentimentAgent,
     TechnicalAnalysisAgent,
 )
-from atp.application.orchestration import TradingOrchestrator
+from atp.application.orchestration import ReachConsensus, TradingOrchestrator
 from atp.application.use_cases import (
     AnalyzeChartPatterns,
     AnalyzeFundamentals,
@@ -58,6 +58,7 @@ from atp.domain.ports import (
     OrderRepository,
     PortfolioRepository,
     SentimentModel,
+    SignalRepository,
     StrategyOptimizer,
 )
 from atp.infrastructure.backtesting import BacktestingPyEngine
@@ -90,6 +91,7 @@ from atp.infrastructure.optimization import OptunaStrategyOptimizer
 from atp.infrastructure.persistence import TimescaleBarRepository, create_engine
 from atp.infrastructure.persistence.json_orders import JsonOrderRepository
 from atp.infrastructure.persistence.json_portfolio import JsonPortfolioRepository
+from atp.infrastructure.persistence.json_signals import JsonSignalRepository
 from atp.infrastructure.sentiment import FinBertSentimentModel, LexiconSentimentModel
 
 
@@ -139,6 +141,8 @@ class Container:
     order_repository: OrderRepository
     execute_trade: ExecuteTrade
     orchestrator: TradingOrchestrator
+    signal_repository: SignalRepository
+    reach_consensus: ReachConsensus
 
     @classmethod
     def build(cls, settings: Settings | None = None) -> Container:
@@ -207,6 +211,17 @@ class Container:
         check_trade_risk = CheckTradeRisk(get_portfolio, market_data, settings.risk)
         broker = PaperBroker(market_data, slippage_bps=settings.execution.slippage_bps)
         order_repository = JsonOrderRepository(settings.data_dir / "orders.jsonl")
+
+        orchestrator = TradingOrchestrator(
+            analyze_ticker,
+            analyze_chart_patterns,
+            analyze_market_research,
+            analyze_fundamentals,
+            analyze_news,
+            analyze_sentiment,
+            learn_from_context,
+        )
+        signal_repository = JsonSignalRepository(settings.data_dir / "signals.jsonl")
         return cls(
             settings=settings,
             engine=engine,
@@ -253,14 +268,15 @@ class Container:
             execute_trade=ExecuteTrade(
                 check_trade_risk, broker, portfolio_repository, order_repository
             ),
-            orchestrator=TradingOrchestrator(
-                analyze_ticker,
-                analyze_chart_patterns,
-                analyze_market_research,
-                analyze_fundamentals,
-                analyze_news,
-                analyze_sentiment,
-                learn_from_context,
+            orchestrator=orchestrator,
+            signal_repository=signal_repository,
+            reach_consensus=ReachConsensus(
+                orchestrator,
+                signal_repository,
+                check_trade_risk,
+                settings.voting.policy,
+                signal_ttl=timedelta(seconds=settings.voting.signal_ttl_seconds),
+                expected_bot=settings.voting.expected_bot,
             ),
         )
 

@@ -239,6 +239,203 @@ def render_processing() -> None:
                     st.json(exchange["response"], expanded=False)
 
 
+BOT_STATUS_RENDER = {
+    "voted": ("✅", st.success),
+    "stale": ("🕒", st.warning),
+    "missing": ("⚠️", st.warning),
+    "not_configured": ("🤖", st.info),
+}
+
+ACTION_RENDER = {
+    "buy": ("🟢 BUY", st.success),
+    "sell": ("🔴 SELL", st.error),
+    "hold": ("⚪ HOLD", st.info),
+}
+
+
+def page_consensus() -> None:
+    st.header("Consensus")
+    st.caption(
+        "Your trading bot and the agent pool both vote; a deterministic policy "
+        "counts them. Consensus decides what is wanted — the risk gate still "
+        "decides what is allowed, and nothing executes without you."
+    )
+
+    with st.form("consensus"):
+        columns = st.columns([2, 3, 2])
+        symbol = columns[0].text_input("Symbol", value="XAUUSD").strip().upper()
+        intervals = columns[1].multiselect("Timeframes", TIMEFRAMES, default=["1d", "4h"])
+        stop_loss = columns[2].number_input(
+            "Stop loss",
+            min_value=0.0,
+            step=1.0,
+            value=0.0,
+            help="Needed to size the proposal. Without it the risk gate rejects for safety.",
+        )
+
+        st.markdown("**Bot integration**")
+        bot_columns = st.columns([1, 2, 3])
+        use_bot = bot_columns[0].checkbox(
+            "Expect a bot",
+            value=True,
+            help=(
+                "Name the bot that should be voting. If it has published nothing "
+                "recent, the agents decide alone and say so explicitly."
+            ),
+        )
+        bot_name = bot_columns[1].text_input("Bot name", value="sniper_bot").strip()
+        bot_columns[2].caption(
+            "Your bot publishes to `POST /signals`. Leave this on and the panel "
+            "below will tell you whether it actually took part."
+        )
+
+        agents = st.multiselect("Agents", AGENTS[:-1], default=AGENTS[:-1])
+        submitted = st.form_submit_button("Reach consensus", type="primary")
+
+    if not submitted:
+        _render_recent_signals()
+        return
+    if not symbol or not intervals:
+        st.warning("Enter a symbol and at least one timeframe.")
+        return
+
+    payload: dict[str, Any] = {
+        "symbol": symbol,
+        "intervals": intervals,
+        "agents": agents,
+    }
+    if use_bot and bot_name:
+        payload["expected_bot"] = bot_name
+    if stop_loss > 0:
+        payload["stop_loss"] = stop_loss
+
+    api = client()
+    try:
+        with st.spinner(f"Collecting {len(agents)} agent votes on {symbol}..."):
+            result = api.consensus(**payload)
+    except ApiError as exc:
+        record_processing(api)
+        show_error(exc)
+        return
+    finally:
+        api.close()
+
+    record_processing(api, result)
+    render_consensus(result)
+
+
+def render_consensus(result: dict[str, Any]) -> None:
+    decision = result["decision"]
+
+    # Bot availability first: it changes how the verdict below should be read.
+    icon, renderer = BOT_STATUS_RENDER.get(result["bot_status"], ("•", st.info))
+    renderer(f"{icon} {result['bot_note']}")
+
+    label, render_action = ACTION_RENDER.get(decision["action"], ("HOLD", st.info))
+    render_action(f"**{label}** — {decision['reason']}")
+
+    columns = st.columns(4)
+    columns[0].metric("Score", f"{decision['score']:+.2f}", help="Confidence-weighted direction")
+    columns[1].metric("Threshold", f"±{decision['policy']['threshold']:.2f}")
+    columns[2].metric("Voters", len(decision["votes"]))
+    columns[3].metric("Agreement", f"{result['agreement']:.0%}")
+
+    tally = result["tally"]
+    st.caption(
+        f"Tally — 🟢 {tally.get('bullish', 0)} bullish · "
+        f"🔴 {tally.get('bearish', 0)} bearish · ⚪ {tally.get('neutral', 0)} neutral"
+        + ("" if decision["quorum_met"] else " · quorum NOT met")
+    )
+
+    st.subheader("How each voter voted")
+    st.dataframe(
+        [
+            {
+                "": DIRECTION_ICON.get(vote["direction"], "⚪"),
+                "voter": vote["voter"],
+                "type": vote["kind"],
+                "direction": vote["direction"],
+                "confidence": f"{vote['confidence']:.0%}",
+                "weight": round(
+                    {"bullish": 1, "bearish": -1, "neutral": 0}[vote["direction"]]
+                    * vote["confidence"],
+                    3,
+                ),
+                "rationale": vote["rationale"][:160],
+            }
+            for vote in decision["votes"]
+        ],
+        **FILL_WIDTH,
+        hide_index=True,
+    )
+
+    _render_risk(result)
+
+
+def _render_risk(result: dict[str, Any]) -> None:
+    risk = result.get("risk")
+    if not risk:
+        st.caption("No position proposed, so there was nothing for the risk gate to assess.")
+        return
+
+    st.subheader("Risk gate")
+    proposal = risk["proposal"]
+    st.write(
+        f"Proposal: **{proposal['side']} {float(proposal['quantity']):g} {proposal['symbol']}** "
+        f"at {float(proposal['entry_price']):,.2f}"
+    )
+    if risk["verdict"] == "approved":
+        st.success("APPROVED — consensus and risk agree.")
+    else:
+        st.error("REJECTED — the gate overrides the vote.")
+        for violation in risk["violations"]:
+            st.markdown(f"- **{violation['rule']}** — {violation['detail']}")
+
+    if result.get("executable"):
+        st.info(
+            "Ready to execute. Go to the **Trade** page to place it — execution is "
+            "deliberately a separate, explicit step."
+        )
+    with st.expander("Risk metrics"):
+        st.json(risk["metrics"])
+
+
+def _render_recent_signals() -> None:
+    """What the bots have been saying, so 'is it connected?' is answerable."""
+    api = client()
+    try:
+        recent = api.signals(limit=10)
+    except ApiError:
+        api.close()
+        return
+    api.close()
+
+    signals = recent.get("signals") or []
+    st.subheader("Recent bot signals")
+    if not signals:
+        st.info(
+            "No bot has published a signal yet. Point your bot at "
+            "`POST /signals` — until then the agents decide alone."
+        )
+        return
+    st.dataframe(
+        [
+            {
+                "": DIRECTION_ICON.get(signal["direction"], "⚪"),
+                "received": signal["received_at"][:19].replace("T", " "),
+                "source": signal["source"],
+                "symbol": signal["symbol"],
+                "direction": signal["direction"],
+                "confidence": f"{signal['confidence']:.0%}",
+                "rationale": (signal.get("rationale") or "")[:120],
+            }
+            for signal in reversed(signals)
+        ],
+        **FILL_WIDTH,
+        hide_index=True,
+    )
+
+
 def page_processing() -> None:
     st.header("Processing")
     st.caption(
@@ -705,6 +902,7 @@ def page_memory() -> None:
 
 PAGES = {
     "Analysis": page_analysis,
+    "Consensus": page_consensus,
     "Processing": page_processing,
     "Portfolio": page_portfolio,
     "Trade": page_trade,

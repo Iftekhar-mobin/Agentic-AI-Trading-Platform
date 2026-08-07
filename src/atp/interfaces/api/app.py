@@ -29,6 +29,7 @@ from atp.interfaces.api.middleware import RequestContextMiddleware, SecurityHead
 from atp.interfaces.api.rate_limit import RateLimiter, RateLimitMiddleware
 from atp.interfaces.api.routes import (
     analysis,
+    consensus,
     health,
     memory,
     models,
@@ -101,7 +102,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     )
 
     register_error_handlers(app)
-    for router in (health, analysis, portfolio, memory, trading, models):
+    for router in (health, analysis, consensus, portfolio, memory, trading, models):
         app.include_router(router.router)
 
     instrument_app(app)

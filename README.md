@@ -8,6 +8,9 @@ explainable.
 **New here?** [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — setup on a free
 LLM tier, how to run it, and what happens between a question and an answer.
 
+**Connecting a trading bot:** [docs/BOT_INTEGRATION.md](docs/BOT_INTEGRATION.md) —
+your bot and the agents both vote; a deterministic policy decides.
+
 **Architecture and roadmap:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Prerequisites
@@ -50,6 +53,9 @@ curl -X POST http://127.0.0.1:8000/analysis \
 | `GET /orders` | `read` | execution audit trail |
 | `GET /memory/{symbol}` | `read` | recall journalled episodes |
 | `GET /models` | `read` | list models and see which is active |
+| `POST /signals` | `signal` | publish an external bot's opinion |
+| `GET /signals` | `read` | audit trail of bot signals |
+| `POST /consensus` | `read` | bot + agents vote; returns the verdict and proposal |
 | `POST /risk-check` | `read` | size a trade and see the gate's verdict |
 | `POST /trade` | `trade` | execute through the gate |
 | `POST /models/select` | `admin` | switch the active model at runtime |

@@ -19,6 +19,7 @@ from atp.domain.ports.orders import OrderRepository
 from atp.domain.ports.portfolio import PortfolioRepository
 from atp.domain.ports.repositories import BarRepository
 from atp.domain.ports.sentiment import SentimentModel
+from atp.domain.ports.signals import SignalRepository
 
 __all__ = [
     "BacktestEngine",
@@ -35,5 +36,6 @@ __all__ = [
     "OrderRepository",
     "PortfolioRepository",
     "SentimentModel",
+    "SignalRepository",
     "StrategyOptimizer",
 ]

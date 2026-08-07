@@ -10,6 +10,7 @@ from atp.domain.services.position_sizing import (
 )
 from atp.domain.services.risk_engine import evaluate_trade
 from atp.domain.services.strategy_params import apply_parameters
+from atp.domain.services.voting import tally
 
 __all__ = [
     "apply_fill",
@@ -20,4 +21,5 @@ __all__ = [
     "monte_carlo_trades",
     "size_by_fraction",
     "size_by_risk",
+    "tally",
 ]

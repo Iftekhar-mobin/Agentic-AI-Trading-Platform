@@ -20,6 +20,7 @@ from atp.infrastructure.config.settings import (
     SentimentSettings,
     Settings,
     TradingMode,
+    VotingSettings,
     get_settings,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     "SentimentSettings",
     "Settings",
     "TradingMode",
+    "VotingSettings",
     "get_settings",
 ]

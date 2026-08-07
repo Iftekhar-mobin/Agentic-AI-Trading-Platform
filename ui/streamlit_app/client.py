@@ -134,6 +134,16 @@ class AtpClient:
         # Downloading weights is gigabytes; the default timeout is nowhere near enough.
         return dict(self._request("POST", "/models/pull", json=payload, timeout=PULL_TIMEOUT))
 
+    def consensus(self, **payload: Any) -> dict[str, Any]:
+        # Runs the whole agent pool, so it needs the analysis timeout, not 30s.
+        return dict(self._request("POST", "/consensus", json=payload, timeout=ANALYSIS_TIMEOUT))
+
+    def publish_signal(self, **payload: Any) -> dict[str, Any]:
+        return dict(self._request("POST", "/signals", json=payload))
+
+    def signals(self, limit: int = 20) -> dict[str, Any]:
+        return dict(self._request("GET", "/signals", params={"limit": limit}))
+
     def risk_check(self, **payload: Any) -> dict[str, Any]:
         return dict(self._request("POST", "/risk-check", json=payload))
 
