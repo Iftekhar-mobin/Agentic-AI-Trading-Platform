@@ -7,6 +7,7 @@ from atp.interfaces.api.routes import (
     memory,
     models,
     portfolio,
+    screening,
     trading,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "memory",
     "models",
     "portfolio",
+    "screening",
     "trading",
 ]

@@ -21,6 +21,10 @@ response would bloat both."""
 ANALYSIS_TIMEOUT = 300.0
 """Analysis runs several LLM calls; the default 5s timeout would always lose."""
 
+SCREEN_TIMEOUT = 1800.0
+"""A screen is ANALYSIS_TIMEOUT per symbol, several at a time. Fifteen symbols
+against a local model is comfortably half an hour."""
+
 PULL_TIMEOUT = 1800.0
 """Downloading a local model is gigabytes over the network."""
 
@@ -137,6 +141,14 @@ class AtpClient:
     def consensus(self, **payload: Any) -> dict[str, Any]:
         # Runs the whole agent pool, so it needs the analysis timeout, not 30s.
         return dict(self._request("POST", "/consensus", json=payload, timeout=ANALYSIS_TIMEOUT))
+
+    def universe(self) -> dict[str, Any]:
+        return dict(self._request("GET", "/universe"))
+
+    def screen(self, **payload: Any) -> dict[str, Any]:
+        # symbols x agents LLM calls, run a few symbols at a time. The slowest
+        # thing the platform does, and the one most worth waiting for.
+        return dict(self._request("POST", "/screen", json=payload, timeout=SCREEN_TIMEOUT))
 
     def publish_signal(self, **payload: Any) -> dict[str, Any]:
         return dict(self._request("POST", "/signals", json=payload))

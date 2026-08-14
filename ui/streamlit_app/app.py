@@ -5,16 +5,21 @@ show is *why* — every agent conclusion is rendered with its evidence,
 confidence and invalidation conditions, because a recommendation you cannot
 interrogate is one you should not act on.
 
-Run it with the API already serving:
+One command is enough — the sidebar can start the API itself when nothing is
+answering on the configured address:
 
-    uv run atp serve
     uv run streamlit run ui/streamlit_app/app.py
+
+Running `uv run atp serve` separately still works, and is what you want when you
+need the server's log in front of you.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +28,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 
 from client import DEFAULT_BASE_URL, MAX_BODY_CHARS, ApiError, AtpClient
+from server import ApiServer, parse_target
 
 
 def _fill_width() -> dict[str, Any]:
@@ -113,10 +119,31 @@ def render_timeframe_directions(timeframes: list[dict[str, Any]]) -> None:
         column.metric(frame["interval"], f"{icon} {frame['direction']}")
 
 
-def render_assessment(title: str, report: dict[str, Any], key: str = "assessment") -> None:
+def section(label: str, *, nested: bool = False, expanded: bool = False) -> Any:
+    """A collapsible box — or a plain labelled panel when already inside one.
+
+    Streamlit refuses to nest expanders, and the screener's per-symbol row *is*
+    an expander. Rather than keep a second copy of every report renderer for
+    that page, all of them open their boxes through here: at the top level it
+    collapses, one level down it is simply an open panel.
+    """
+    if not nested:
+        return st.expander(label, expanded=expanded)
+    st.markdown(f"**{label}**")
+    return st.container(border=True)
+
+
+def render_assessment(
+    title: str,
+    report: dict[str, Any],
+    key: str = "assessment",
+    *,
+    nested: bool = False,
+) -> None:
     assessment = report[key]
     direction = assessment.get("direction", "neutral")
-    with st.expander(f"{DIRECTION_ICON.get(direction, '⚪')} {title} — {direction}", expanded=True):
+    label = f"{DIRECTION_ICON.get(direction, '⚪')} {title} — {direction}"
+    with section(label, nested=nested, expanded=True):
         confidence_bar(title, assessment["confidence"])
         render_explanation(assessment)
 
@@ -324,7 +351,11 @@ def page_consensus() -> None:
     render_consensus(result)
 
 
-def render_consensus(result: dict[str, Any]) -> None:
+def render_consensus(result: dict[str, Any], *, nested: bool = False) -> None:
+    """The verdict, the voters, and what the risk gate made of it.
+
+    Reused verbatim for each row of a screen: a shortlisted symbol is read
+    exactly the way a single-symbol consensus is."""
     decision = result["decision"]
 
     # Bot availability first: it changes how the verdict below should be read.
@@ -369,10 +400,10 @@ def render_consensus(result: dict[str, Any]) -> None:
         hide_index=True,
     )
 
-    _render_risk(result)
+    _render_risk(result, nested=nested)
 
 
-def _render_risk(result: dict[str, Any]) -> None:
+def _render_risk(result: dict[str, Any], *, nested: bool = False) -> None:
     risk = result.get("risk")
     if not risk:
         st.caption("No position proposed, so there was nothing for the risk gate to assess.")
@@ -396,7 +427,7 @@ def _render_risk(result: dict[str, Any]) -> None:
             "Ready to execute. Go to the **Trade** page to place it — execution is "
             "deliberately a separate, explicit step."
         )
-    with st.expander("Risk metrics"):
+    with section("Risk metrics", nested=nested):
         st.json(risk["metrics"])
 
 
@@ -604,12 +635,23 @@ def page_analysis() -> None:
     with st.expander("⚙️ Processing — how this run was done", expanded=False):
         render_processing()
 
+    render_reports(result)
+
+
+def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
+    """Every agent report the run produced, in reading order.
+
+    Shared by the Analysis page and the screener's per-symbol detail: the same
+    conclusions deserve the same rendering wherever they are read, and a second
+    copy of this would drift within a milestone. ``nested`` says whether there
+    is already an expander above us — see ``section``.
+    """
     if technical := result.get("technical_report"):
-        render_assessment("Technical", technical)
+        render_assessment("Technical", technical, nested=nested)
         st.info(f"**Timeframe alignment.** {technical['assessment']['timeframe_alignment']}")
         render_timeframe_directions(technical["timeframes"])
         for frame in technical["timeframes"]:
-            with st.expander(f"Indicator readings - {frame['interval']}"):
+            with section(f"Indicator readings - {frame['interval']}", nested=nested):
                 st.dataframe(
                     [
                         {
@@ -624,7 +666,7 @@ def page_analysis() -> None:
                 )
 
     if patterns := result.get("chart_pattern_report"):
-        render_assessment("Chart patterns", patterns)
+        render_assessment("Chart patterns", patterns, nested=nested)
         st.info(f"**Timeframe alignment.** {patterns['assessment']['timeframe_alignment']}")
         render_timeframe_directions(patterns["timeframes"])
         for frame in patterns["timeframes"]:
@@ -632,7 +674,7 @@ def page_analysis() -> None:
                 f"{frame['interval']} - {len(frame['patterns'])} patterns, "
                 f"{len(frame['levels'])} levels"
             )
-            with st.expander(label):
+            with section(label, nested=nested):
                 if frame["patterns"]:
                     st.dataframe(
                         [
@@ -666,8 +708,8 @@ def page_analysis() -> None:
                     )
 
     if research := result.get("market_research_report"):
-        render_assessment(f"Market research vs {research['benchmark']}", research)
-        with st.expander("Relative measurements"):
+        render_assessment(f"Market research vs {research['benchmark']}", research, nested=nested)
+        with section("Relative measurements", nested=nested):
             st.dataframe(
                 [
                     {
@@ -682,8 +724,8 @@ def page_analysis() -> None:
             )
 
     if fundamental := result.get("fundamental_report"):
-        render_assessment("Fundamentals", fundamental)
-        with st.expander("Metric readings"):
+        render_assessment("Fundamentals", fundamental, nested=nested)
+        with section("Metric readings", nested=nested):
             st.dataframe(
                 [
                     {
@@ -699,9 +741,9 @@ def page_analysis() -> None:
             )
 
     if news := result.get("news_report"):
-        render_assessment("News", news)
+        render_assessment("News", news, nested=nested)
         st.markdown("**Themes:** " + ", ".join(news["assessment"]["key_themes"]))
-        with st.expander(f"{len(news['articles'])} articles"):
+        with section(f"{len(news['articles'])} articles", nested=nested):
             for article in news["articles"]:
                 st.markdown(
                     f"- [{article['title']}]({article['url'] or '#'}) — "
@@ -709,7 +751,7 @@ def page_analysis() -> None:
                 )
 
     if sentiment := result.get("sentiment_report"):
-        render_assessment("Sentiment", sentiment)
+        render_assessment("Sentiment", sentiment, nested=nested)
         summary = sentiment["summary"]
         columns = st.columns(4)
         columns[0].metric("Weighted polarity", f"{summary['weighted_polarity']:+.2f}")
@@ -718,7 +760,7 @@ def page_analysis() -> None:
         columns[3].metric("Classifier", sentiment["model_name"])
 
     if learning := result.get("learning_report"):
-        render_assessment("Learning", learning, key="entry")
+        render_assessment("Learning", learning, "entry", nested=nested)
         if regime := learning.get("regime"):
             st.info(f"Market regime: **{regime['trend']} / {regime['volatility']}**")
         st.markdown("**Lessons**")
@@ -726,7 +768,7 @@ def page_analysis() -> None:
             st.markdown(f"- {lesson}")
         st.caption(learning["entry"]["regime_note"])
         if recalled := learning.get("recalled"):
-            with st.expander(f"{len(recalled)} recalled episodes"):
+            with section(f"{len(recalled)} recalled episodes", nested=nested):
                 for match in recalled:
                     episode = match["episode"]
                     st.markdown(
@@ -900,18 +942,411 @@ def page_memory() -> None:
                 st.json(episode["metadata"])
 
 
-PAGES = {
-    "Analysis": page_analysis,
-    "Consensus": page_consensus,
-    "Processing": page_processing,
-    "Portfolio": page_portfolio,
-    "Trade": page_trade,
-    "Memory": page_memory,
-    "Models": page_models,
+CLASS_ICON = {
+    "forex": "💱",
+    "stock": "🏢",
+    "index": "📊",
+    "commodity": "🛢️",
+    "crypto": "🪙",
 }
 
+ACTION_BADGE = {"buy": "🟢 BUY", "sell": "🔴 SELL", "hold": "⚪ HOLD"}
 
-def main() -> None:
+
+def _universe() -> dict[str, Any] | None:
+    """The instrument menu, fetched once per session.
+
+    Streamlit reruns the whole script on every click, and the menu does not
+    change between them; refetching would add a request to the trace for each
+    ticked box and make the Processing panel useless.
+    """
+    if cached := st.session_state.get("universe"):
+        return cached if isinstance(cached, dict) else None
+
+    api = client()
+    try:
+        universe = api.universe()
+    except ApiError as exc:
+        show_error(exc)
+        return None
+    finally:
+        api.close()
+
+    st.session_state["universe"] = universe
+    return universe
+
+
+def _basket(universe: dict[str, Any]) -> list[str]:
+    """The selection widgets, and the symbols they currently hold.
+
+    Outside a form on purpose: the cost estimate below has to move as boxes are
+    ticked, and a form would only tell you what a screen would cost after you
+    had already asked for it.
+    """
+    picked: list[str] = []
+    defaults: list[str] = universe["default_selection"]
+    columns = st.columns(2)
+
+    for index, category in enumerate(universe["categories"]):
+        assets = category["assets"]
+        labels = {asset["symbol"]: f"{asset['symbol']} · {asset['name']}" for asset in assets}
+        icon = CLASS_ICON.get(category["asset_class"], "•")
+        with columns[index % 2]:
+            picked.extend(
+                st.multiselect(
+                    f"{icon} {category['label']} ({len(assets)})",
+                    options=list(labels),
+                    default=[symbol for symbol in defaults if symbol in labels],
+                    format_func=lambda symbol, labels=labels: labels[symbol],  # type: ignore[misc]
+                    key=f"basket_{category['asset_class']}",
+                )
+            )
+
+    custom = st.text_input(
+        "Anything else (comma separated)",
+        placeholder="SHEL, ^HSI, DOGEUSD",
+        help="Not limited to the menu. Unlisted tickers are screened and ranked "
+        "the same way; they just have no curated name.",
+    )
+    for entry in custom.split(","):
+        symbol = entry.strip().upper()
+        if symbol and symbol not in picked:
+            picked.append(symbol)
+    return picked
+
+
+def page_opportunities() -> None:
+    st.header("Opportunities")
+    st.caption(
+        "Pick instruments from any market, run the full agent pool on each, and let "
+        "the ranking agent say which few are worth your attention. The shortlist is "
+        "comparative — it says which evidence here is strongest, never what will pay."
+    )
+
+    universe = _universe()
+    if universe is None:
+        return
+
+    st.subheader("1. Choose a basket")
+    symbols = _basket(universe)
+
+    st.subheader("2. How to analyse them")
+    columns = st.columns([3, 2, 2])
+    intervals = columns[0].multiselect("Timeframes", TIMEFRAMES, default=["1d", "4h"])
+    top_n = int(columns[1].number_input("Shortlist size", min_value=1, max_value=25, value=5))
+    bot_name = columns[2].text_input(
+        "Expect a bot (optional)",
+        value="",
+        help="Name a bot and its silence is reported per symbol instead of passing unnoticed.",
+    )
+    agents = st.multiselect("Voting agents", AGENTS[:-1], default=AGENTS[:-1])
+
+    maximum = universe["max_symbols"]
+    calls = len(symbols) * len(agents) + 1
+    over = len(symbols) > maximum
+    st.caption(
+        f"**{len(symbols)} symbols x {len(agents)} agents = ~{calls} LLM calls.** "
+        f"Server cap is {maximum} symbols per screen; a few run at a time, so expect "
+        "minutes rather than seconds."
+    )
+    if over:
+        st.warning(
+            f"{len(symbols)} selected but only the first {maximum} would be screened. "
+            "Trim the basket so nothing is silently dropped."
+        )
+
+    blocked = not symbols or not intervals or not agents or over
+    if not st.button("Screen and rank", type="primary", disabled=blocked):
+        if not symbols:
+            st.info("Tick at least one instrument above.")
+        _render_screen(st.session_state.get("screen"))
+        return
+
+    api = client()
+    payload: dict[str, Any] = {
+        "symbols": symbols,
+        "intervals": intervals,
+        "agents": agents,
+        "top_n": top_n,
+    }
+    if bot_name.strip():
+        payload["expected_bot"] = bot_name.strip()
+
+    try:
+        with st.spinner(f"Screening {len(symbols)} instruments — this is the slow one..."):
+            result = api.screen(**payload)
+    except ApiError as exc:
+        record_processing(api)
+        show_error(exc)
+        return
+    finally:
+        api.close()
+
+    record_processing(api)
+    st.session_state["screen"] = result
+    _render_screen(result)
+
+
+def _render_screen(result: dict[str, Any] | None) -> None:
+    if not result:
+        return
+
+    ranking = result["ranking"]
+    outcomes = {outcome["symbol"]: outcome for outcome in result["outcomes"]}
+    ranked = ranking["ranked"]
+
+    st.subheader("3. The shortlist")
+    columns = st.columns(4)
+    columns[0].metric("Screened", len(outcomes))
+    columns[1].metric("Shortlisted", len(ranked))
+    columns[2].metric("Failed", len(result.get("failures") or []))
+    columns[3].metric("Took", f"{result.get('duration_ms', 0) / 1000:.0f}s")
+
+    for failure in result.get("failures") or []:
+        st.warning(f"**{failure['symbol']}** could not be screened — {failure['error']}")
+
+    if not ranking.get("ranked_by_agent", True):
+        st.warning(
+            "The ranking agent did not answer, so this order is the deterministic "
+            "composite alone — no comparative judgement has been applied."
+        )
+    if narrative := ranking.get("narrative"):
+        st.info(f"**The basket as a whole.** {narrative}")
+
+    if not ranked:
+        st.caption("Nothing to rank.")
+        return
+
+    st.dataframe(
+        [_leaderboard_row(row) for row in ranked],
+        **FILL_WIDTH,
+        hide_index=True,
+    )
+    st.caption(
+        "Composite = 0.40·conviction + 0.25·agreement + 0.20·confidence + 0.15·coverage, "
+        "then reduced if quorum was missed or the risk gate refused. Potential is the "
+        "ranking agent's comparative read, relative to this basket only."
+    )
+
+    st.subheader("4. Why — click any row")
+    for row in ranked:
+        _render_opportunity(row, outcomes.get(row["candidate"]["symbol"]))
+
+    shortlisted = {row["candidate"]["symbol"] for row in ranked}
+    rest = [outcome for symbol, outcome in outcomes.items() if symbol not in shortlisted]
+    if rest:
+        st.subheader(f"Also screened ({len(rest)})")
+        st.caption("Everything that did not make the shortlist, with its full analysis.")
+        for outcome in rest:
+            with st.expander(
+                f"{ACTION_BADGE.get(outcome['decision']['action'], '⚪')} {outcome['symbol']} — "
+                f"score {outcome['decision']['score']:+.2f}"
+            ):
+                render_consensus(outcome, nested=True)
+                render_reports(outcome["reports"], nested=True)
+
+
+def _leaderboard_row(row: dict[str, Any]) -> dict[str, Any]:
+    candidate = row["candidate"]
+    verdict = row.get("verdict") or {}
+    components = candidate["components"]
+    return {
+        "#": row["rank"],
+        "": CLASS_ICON.get(candidate["asset_class"], "•"),
+        "symbol": candidate["symbol"],
+        "name": candidate["name"],
+        "action": ACTION_BADGE.get(candidate["action"], candidate["action"]),
+        "potential": f"{verdict['profit_potential']:.0%}" if verdict else "—",
+        "composite": round(components["composite"], 3),
+        "score": f"{candidate['score']:+.2f}",
+        "agreement": f"{candidate['agreement']:.0%}",
+        "voters": len(candidate["votes"]),
+        "risk": candidate.get("risk_verdict") or "not proposed",
+        "driver": verdict.get("key_driver", "—"),
+    }
+
+
+def _render_opportunity(row: dict[str, Any], outcome: dict[str, Any] | None) -> None:
+    """One shortlisted instrument: the ranker's case, then the whole analysis."""
+    candidate = row["candidate"]
+    verdict = row.get("verdict")
+    icon = CLASS_ICON.get(candidate["asset_class"], "•")
+    potential = f" · potential {verdict['profit_potential']:.0%}" if verdict else ""
+    label = (
+        f"#{row['rank']}  {icon} {candidate['symbol']} — {candidate['name']} · "
+        f"{ACTION_BADGE.get(candidate['action'], candidate['action'])}{potential}"
+    )
+
+    with st.expander(label, expanded=row["rank"] == 1):
+        if verdict:
+            confidence_bar("Ranking", verdict["confidence"])
+            st.markdown(f"**Why it ranks here.** {verdict['reasoning']}")
+            columns = st.columns(3)
+            columns[0].markdown(f"**Key driver**\n\n{verdict['key_driver']}")
+            columns[1].markdown(f"**Primary risk**\n\n{verdict['primary_risk']}")
+            columns[2].markdown(f"**Horizon**\n\n{verdict['horizon']}")
+            st.markdown("**Evidence**")
+            for item in verdict.get("evidence", []):
+                st.markdown(f"- `{item['source']}` — {item['statement']}")
+            st.markdown("**This ranking is wrong if**")
+            for condition in verdict.get("invalidation_conditions", []):
+                st.markdown(f"- {condition}")
+        else:
+            st.caption(
+                "The ranking agent did not write this one up; it is placed by the "
+                "deterministic composite alone."
+            )
+
+        components = candidate["components"]
+        st.markdown("**How the composite was reached**")
+        columns = st.columns(6)
+        for column, name in zip(
+            columns,
+            ("conviction", "agreement", "confidence", "coverage"),
+            strict=False,
+        ):
+            column.metric(name.title(), f"{components[name]:.2f}")
+        penalty = components["quorum_penalty"] * components["risk_penalty"]
+        columns[4].metric("Penalties", f"x{penalty:.2f}")
+        columns[5].metric("Composite", f"{components['composite']:.3f}")
+
+        if candidate.get("highlights"):
+            for highlight in candidate["highlights"]:
+                st.caption(f"• {highlight}")
+
+        if outcome is None:
+            st.caption("The underlying analysis is unavailable for this symbol.")
+            return
+
+        st.divider()
+        render_consensus(outcome, nested=True)
+        st.divider()
+        render_reports(outcome["reports"], nested=True)
+
+
+PAGES: list[tuple[str, str, Callable[[], None]]] = [
+    # (title, icon, renderer) — the order is the order of the top bar, and the
+    # first one is where the console opens.
+    ("Opportunities", ":material/leaderboard:", page_opportunities),
+    ("Analysis", ":material/analytics:", page_analysis),
+    ("Consensus", ":material/how_to_vote:", page_consensus),
+    ("Processing", ":material/manage_search:", page_processing),
+    ("Portfolio", ":material/account_balance_wallet:", page_portfolio),
+    ("Trade", ":material/swap_horiz:", page_trade),
+    ("Memory", ":material/psychology:", page_memory),
+    ("Models", ":material/smart_toy:", page_models),
+]
+
+
+def navigate() -> None:
+    """Top-bar navigation, one page per selection.
+
+    ``st.tabs`` would look the part and be the wrong mechanism: it renders every
+    tab's body on every run, so merely opening the console would fire a
+    portfolio fetch, an order fetch and a memory query for pages nobody looked
+    at. ``st.navigation`` runs only the page you are on and puts it in the URL,
+    so a page can be linked to and the back button behaves.
+
+    Session state is shared across pages, which is what lets a screen survive
+    stepping over to Processing to see how it was run.
+    """
+    if not hasattr(st, "navigation"):  # Streamlit older than the pinned 1.60
+        titles = {title: render for title, _, render in PAGES}
+        st.sidebar.divider()
+        titles[st.sidebar.radio("Page", list(titles))]()
+        return
+
+    st.navigation(
+        [
+            st.Page(render, title=title, icon=icon, url_path=_url_path(title), default=index == 0)
+            for index, (title, icon, render) in enumerate(PAGES)
+        ],
+        position="top",
+    ).run()
+
+
+def _url_path(title: str) -> str:
+    return title.lower().replace(" ", "-")
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SERVER_LOG = PROJECT_ROOT / "data" / "api-server.log"
+# Seconds to wait for the API to answer after starting it. Cold imports —
+# pandas, and torch when FinBERT is selected — dominate this, not the server.
+# A comment rather than an attribute docstring on purpose: Streamlit's "magic"
+# renders every bare expression at module level, and a docstring is one.
+STARTUP_TIMEOUT = 40.0
+
+
+@st.cache_resource
+def api_server() -> ApiServer:
+    """One supervised server, shared by every browser session.
+
+    ``cache_resource`` rather than session state: two open tabs must see the
+    same process, or the second one would happily start a rival server and both
+    would then fight over the port.
+    """
+    return ApiServer(PROJECT_ROOT, SERVER_LOG)
+
+
+def _api_is_up() -> bool:
+    api = client()
+    try:
+        api.health()
+    except ApiError:
+        return False
+    else:
+        return True
+    finally:
+        api.close()
+
+
+def server_controls(*, reachable: bool) -> None:
+    """Start and stop the API without leaving the console.
+
+    Only offered for a local address: a base URL pointing at another machine is
+    someone else's server, and a button that pretends otherwise would start a
+    process that answers nothing the console is looking at.
+    """
+    server = api_server()
+    target = parse_target(st.session_state.get("base_url", DEFAULT_BASE_URL))
+
+    if not target.is_local:
+        st.sidebar.caption(f"`{target.host}` is remote — start it there.")
+        return
+
+    if reachable:
+        if server.managed:
+            st.sidebar.caption(f"Started here · pid {server.pid}")
+            if st.sidebar.button("Stop the API", **FILL_WIDTH):
+                server.stop()
+                st.rerun()
+        else:
+            # Someone else's process. We can talk to it; we do not own it.
+            st.sidebar.caption("Started outside the console.")
+        return
+
+    if st.sidebar.button("Start the API", type="primary", **FILL_WIDTH):
+        server.start(target)
+        deadline = time.monotonic() + STARTUP_TIMEOUT
+        with st.spinner(f"Starting the API on {target.host}:{target.port}..."):
+            while time.monotonic() < deadline:
+                if server.exit_code is not None:
+                    break  # It died — fall through and show the log.
+                if _api_is_up():
+                    st.rerun()
+                time.sleep(0.5)
+        st.rerun()
+
+    if server.exit_code is not None:
+        st.sidebar.error(f"The server exited with code {server.exit_code}.")
+    if tail := server.log_tail():
+        with st.sidebar.expander("Server log"):
+            st.code(tail, language="text")
+
+
+def sidebar() -> None:
+    """Connection, server control, and nothing else — navigation is up top."""
     st.sidebar.title("📈 ATP Console")
     st.session_state.setdefault("base_url", DEFAULT_BASE_URL)
     st.session_state.setdefault("api_key", "")
@@ -920,17 +1355,23 @@ def main() -> None:
     st.sidebar.text_input("API key", key="api_key", type="password")
 
     api = client()
+    reachable = True
     try:
         health = api.health()
         st.sidebar.success(f"API {health['version']} · {health['status']}")
     except ApiError as exc:
+        reachable = False
         st.sidebar.error(f"API unreachable\n\n{exc}")
     finally:
         api.close()
 
-    page = st.sidebar.radio("Page", list(PAGES))
+    server_controls(reachable=reachable)
     st.sidebar.caption("Decision support only. Recommendations are explainable, not guaranteed.")
-    PAGES[page]()
+
+
+def main() -> None:
+    sidebar()
+    navigate()
 
 
 main()

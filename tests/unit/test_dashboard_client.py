@@ -159,3 +159,31 @@ def test_non_json_error_bodies_do_not_crash_the_client() -> None:
 
     with pytest.raises(ApiError, match="bad gateway"):
         make_client(handler).portfolio()
+
+
+def test_a_screen_sends_the_whole_basket_and_waits_for_it() -> None:
+    """A screen is minutes of work; the default 30s timeout would always lose."""
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen["body"] = json.loads(request.content)
+        seen["timeout"] = request.extensions.get("timeout", {}).get("read")
+        return httpx.Response(200, json={"ranking": {"ranked": []}, "outcomes": []})
+
+    make_client(handler).screen(
+        symbols=["XAUUSD", "NVDA"], intervals=["1d"], agents=["technical_analysis"], top_n=5
+    )
+    assert seen["body"]["symbols"] == ["XAUUSD", "NVDA"]
+    assert seen["body"]["top_n"] == 5
+    assert seen["timeout"] > 300
+
+
+def test_the_universe_is_a_plain_get() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/universe"
+        return httpx.Response(200, json={"categories": [], "count": 0})
+
+    assert make_client(handler).universe()["count"] == 0

@@ -285,6 +285,36 @@ class VotingSettings(BaseModel):
         )
 
 
+class ScreeningSettings(BaseModel):
+    """Multi-symbol screening settings (env: ``ATP_SCREENING__*``).
+
+    A screen is the most expensive operation the platform offers - one LLM call
+    per agent per symbol, plus one to rank the results - so both limits here are
+    cost controls first and performance knobs second.
+    """
+
+    concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description="Symbols analysed at once. Raise for a hosted provider with "
+        "headroom; leave low for a local Ollama, which serialises anyway",
+    )
+    max_symbols: int = Field(
+        default=15,
+        ge=1,
+        le=50,
+        description="Hard cap per screen. Symbols beyond it are dropped with a "
+        "warning rather than silently multiplying the bill",
+    )
+    top_n: int = Field(
+        default=5,
+        ge=1,
+        le=25,
+        description="Default shortlist length; the rest stay one click away",
+    )
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings (env: ``ATP_REDIS__*``)."""
 
@@ -321,6 +351,7 @@ class Settings(BaseSettings):
     risk: RiskLimits = Field(default_factory=RiskLimits)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     voting: VotingSettings = Field(default_factory=VotingSettings)
+    screening: ScreeningSettings = Field(default_factory=ScreeningSettings)
     news: NewsSettings = Field(default_factory=NewsSettings)
     sentiment: SentimentSettings = Field(default_factory=SentimentSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)

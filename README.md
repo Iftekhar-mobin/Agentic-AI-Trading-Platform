@@ -32,7 +32,7 @@ uv run atp analyze AAPL -t 1d,4h,1h  # multi-timeframe analysis
 uv run atp analyze AAPL -a technical_analysis,chart_pattern   # run a subset
 uv run atp backtest AAPL -s ema_cross   # backtest a strategy preset
 uv run atp serve           # start the HTTP API on http://127.0.0.1:8000
-uv run streamlit run ui/streamlit_app/app.py   # dashboard (needs the API running)
+uv run streamlit run ui/streamlit_app/app.py   # dashboard (can start the API for you)
 uv run pytest              # run the test suite
 ```
 
@@ -56,6 +56,8 @@ curl -X POST http://127.0.0.1:8000/analysis \
 | `POST /signals` | `signal` | publish an external bot's opinion |
 | `GET /signals` | `read` | audit trail of bot signals |
 | `POST /consensus` | `read` | bot + agents vote; returns the verdict and proposal |
+| `GET /universe` | `read` | the selectable instruments, grouped by asset class |
+| `POST /screen` | `read` | screen a basket and rank the best few opportunities |
 | `POST /risk-check` | `read` | size a trade and see the gate's verdict |
 | `POST /trade` | `trade` | execute through the gate |
 | `POST /models/select` | `admin` | switch the active model at runtime |

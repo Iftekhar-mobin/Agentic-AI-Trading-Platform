@@ -18,10 +18,15 @@ from atp.application.agents import (
     FundamentalAnalysisAgent,
     MarketResearchAgent,
     NewsAgent,
+    OpportunityRankingAgent,
     SentimentAgent,
     TechnicalAnalysisAgent,
 )
-from atp.application.orchestration import ReachConsensus, TradingOrchestrator
+from atp.application.orchestration import (
+    ReachConsensus,
+    ScreenOpportunities,
+    TradingOrchestrator,
+)
 from atp.application.use_cases import (
     AnalyzeChartPatterns,
     AnalyzeFundamentals,
@@ -143,6 +148,8 @@ class Container:
     orchestrator: TradingOrchestrator
     signal_repository: SignalRepository
     reach_consensus: ReachConsensus
+    opportunity_ranking_agent: OpportunityRankingAgent
+    screen_opportunities: ScreenOpportunities
 
     @classmethod
     def build(cls, settings: Settings | None = None) -> Container:
@@ -222,6 +229,15 @@ class Container:
             learn_from_context,
         )
         signal_repository = JsonSignalRepository(settings.data_dir / "signals.jsonl")
+        reach_consensus = ReachConsensus(
+            orchestrator,
+            signal_repository,
+            check_trade_risk,
+            settings.voting.policy,
+            signal_ttl=timedelta(seconds=settings.voting.signal_ttl_seconds),
+            expected_bot=settings.voting.expected_bot,
+        )
+        opportunity_ranking_agent = OpportunityRankingAgent(llm)
         return cls(
             settings=settings,
             engine=engine,
@@ -270,13 +286,14 @@ class Container:
             ),
             orchestrator=orchestrator,
             signal_repository=signal_repository,
-            reach_consensus=ReachConsensus(
-                orchestrator,
-                signal_repository,
-                check_trade_risk,
-                settings.voting.policy,
-                signal_ttl=timedelta(seconds=settings.voting.signal_ttl_seconds),
-                expected_bot=settings.voting.expected_bot,
+            reach_consensus=reach_consensus,
+            opportunity_ranking_agent=opportunity_ranking_agent,
+            screen_opportunities=ScreenOpportunities(
+                reach_consensus,
+                opportunity_ranking_agent,
+                concurrency=settings.screening.concurrency,
+                max_symbols=settings.screening.max_symbols,
+                default_top_n=settings.screening.top_n,
             ),
         )
 

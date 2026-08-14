@@ -34,6 +34,7 @@ from atp.interfaces.api.routes import (
     memory,
     models,
     portfolio,
+    screening,
     trading,
 )
 
@@ -102,7 +103,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     )
 
     register_error_handlers(app)
-    for router in (health, analysis, consensus, portfolio, memory, trading, models):
+    for router in (health, analysis, consensus, screening, portfolio, memory, trading, models):
         app.include_router(router.router)
 
     instrument_app(app)

@@ -83,7 +83,7 @@ python_version = "3.12"
 # ui/streamlit_app is on the path so the dashboard client is type-checked too
 # (the tests import it directly, exactly as Streamlit does).
 mypy_path = "src:ui/streamlit_app"
-files = ["src", "tests", "ui/streamlit_app/client.py"]
+files = ["src", "tests", "ui/streamlit_app/client.py", "ui/streamlit_app/server.py"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
