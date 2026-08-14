@@ -1,0 +1,185 @@
+"""Consensus endpoints: where an external bot and the agent pool meet.
+
+Two entry points, because bots integrate in two different shapes:
+
+- ``POST /signals`` records an opinion and returns immediately. Right for a bot
+  that evaluates on a fast cycle and does not want to block on an LLM workflow.
+- ``POST /consensus`` runs the agents and returns the combined verdict. It
+  accepts the bot's vote inline, so a bot that wants an answer needs one call
+  rather than two.
+
+Both take the bot's own vocabulary. ``python_signal_bot`` emits ``BUY``/``SELL``
+at decision level and ``bullish``/``bearish`` at signal level; requiring it to
+translate would be this platform's problem leaking into the caller's.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
+
+from atp.application.orchestration import ReachConsensus
+from atp.domain.models.analysis import SignalDirection
+from atp.domain.models.market import BarInterval
+from atp.domain.models.signals import BotSignal
+from atp.domain.models.trading import RiskDecision
+from atp.domain.models.voting import BotStatus, ConsensusDecision
+from atp.domain.ports.signals import SignalRepository
+from atp.interfaces.api.security import RequiresRead, RequiresSignal
+
+router = APIRouter(tags=["consensus"])
+
+_DIRECTION_ALIASES: dict[str, SignalDirection] = {
+    "buy": SignalDirection.BULLISH,
+    "long": SignalDirection.BULLISH,
+    "bullish": SignalDirection.BULLISH,
+    "up": SignalDirection.BULLISH,
+    "sell": SignalDirection.BEARISH,
+    "short": SignalDirection.BEARISH,
+    "bearish": SignalDirection.BEARISH,
+    "down": SignalDirection.BEARISH,
+    "neutral": SignalDirection.NEUTRAL,
+    "none": SignalDirection.NEUTRAL,
+    "hold": SignalDirection.NEUTRAL,
+    "flat": SignalDirection.NEUTRAL,
+}
+"""Every spelling of a direction seen in the wild, mapped to the domain's."""
+
+
+def _coerce_direction(value: Any) -> SignalDirection:
+    if isinstance(value, SignalDirection):
+        return value
+    if isinstance(value, str) and (mapped := _DIRECTION_ALIASES.get(value.strip().lower())):
+        return mapped
+    allowed = sorted(_DIRECTION_ALIASES)
+    msg = f"unknown direction {value!r}; expected one of {allowed}"
+    raise ValueError(msg)
+
+
+class SignalRequest(BaseModel):
+    """A bot's published opinion.
+
+    Mirrors ``TradeDecision`` from ``python_signal_bot`` closely enough that a
+    caller can forward its own fields with almost no mapping.
+    """
+
+    symbol: str = Field(min_length=1, max_length=12, examples=["XAUUSD"])
+    direction: SignalDirection = Field(examples=["BUY"])
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    source: str = Field(min_length=1, max_length=64, examples=["mt5-ea-v3"])
+    rationale: str = Field(default="", max_length=2000)
+    strategy: str | None = Field(default=None, max_length=64)
+
+    @field_validator("direction", mode="before")
+    @classmethod
+    def _accept_bot_vocabulary(cls, value: Any) -> SignalDirection:
+        return _coerce_direction(value)
+
+    def to_signal(self) -> BotSignal:
+        return BotSignal(
+            symbol=self.symbol,
+            direction=self.direction,
+            confidence=self.confidence,
+            source=self.source,
+            rationale=self.rationale,
+            strategy=self.strategy,
+        )
+
+
+class ConsensusRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=12, examples=["XAUUSD"])
+    intervals: list[BarInterval] = Field(
+        default_factory=lambda: [BarInterval.DAY_1],
+        min_length=1,
+        max_length=5,
+    )
+    agents: list[str] = Field(default_factory=list)
+    expected_bot: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Bot that should be voting, e.g. 'sniper_bot'. Naming it turns "
+        "its silence into a reported status instead of an unnoticed absence.",
+        examples=["sniper_bot"],
+    )
+    signal: SignalRequest | None = Field(
+        default=None,
+        description="The caller's own vote, submitted inline; omit to use the latest stored one",
+    )
+    stop_loss: float | None = Field(
+        default=None,
+        gt=0,
+        description="Used to size the proposal; without it the risk gate rejects for safety",
+    )
+
+
+class ConsensusResponse(BaseModel):
+    decision: ConsensusDecision
+    risk: RiskDecision | None = None
+    bot_signal: BotSignal | None = None
+    stale_signal: BotSignal | None = Field(
+        default=None,
+        description="A signal too old to vote - the bot went quiet rather than disagreed",
+    )
+    bot_status: BotStatus
+    bot_note: str = Field(description="Plain-language account of the bot's participation")
+    agreement: float = Field(description="Share of directional voters siding with the outcome")
+    tally: dict[str, int]
+    executable: bool = Field(
+        description="Consensus wants a trade and the risk gate approved it; still needs a human",
+    )
+
+
+def _signals(request: Request) -> SignalRepository:
+    return request.app.state.container.signal_repository  # type: ignore[no-any-return]
+
+
+def _consensus(request: Request) -> ReachConsensus:
+    return request.app.state.container.reach_consensus  # type: ignore[no-any-return]
+
+
+@router.post("/signals", dependencies=[RequiresSignal])
+async def publish_signal(request: SignalRequest, http_request: Request) -> BotSignal:
+    """Record a bot's opinion so it can vote in a later consensus run."""
+    signal = request.to_signal()
+    await _signals(http_request).append(signal)
+    return signal
+
+
+@router.get("/signals", dependencies=[RequiresRead])
+async def list_signals(http_request: Request, limit: int = 50) -> dict[str, Any]:
+    """The recent audit trail of what bots have claimed."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    signals = await _signals(http_request).list_signals(limit=limit)
+    return {"signals": signals, "count": len(signals)}
+
+
+@router.post("/consensus", response_model=ConsensusResponse, dependencies=[RequiresRead])
+async def reach_consensus(request: ConsensusRequest, http_request: Request) -> ConsensusResponse:
+    """Run the agents, count them with the bot, and return the verdict.
+
+    Never executes. A caller that wants the trade sends the proposal to
+    ``POST /trade``, which is a different scope on purpose.
+    """
+    result = await _consensus(http_request).execute(
+        request.symbol,
+        request.intervals,
+        agents=request.agents or None,
+        signal=request.signal.to_signal() if request.signal else None,
+        stop_loss=request.stop_loss,
+        expected_bot=request.expected_bot,
+    )
+    decision = result.decision
+    return ConsensusResponse(
+        decision=decision,
+        risk=result.risk,
+        bot_signal=result.bot_signal,
+        stale_signal=result.stale_signal,
+        bot_status=result.bot_status,
+        bot_note=result.bot_note,
+        agreement=round(decision.agreement, 4),
+        tally=decision.tally,
+        executable=result.risk is not None and result.risk.verdict.value == "approved",
+    )
