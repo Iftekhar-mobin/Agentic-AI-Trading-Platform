@@ -9,7 +9,9 @@ explainable.
 LLM tier, how to run it, and what happens between a question and an answer.
 
 **Connecting a trading bot:** [docs/BOT_INTEGRATION.md](docs/BOT_INTEGRATION.md) —
-your bot and the agents both vote; a deterministic policy decides.
+your bot votes alongside the agents, or asks them independently and compares
+verdicts; a deterministic policy decides either way. Bots can supply their own
+candles so the agents analyse the exact series the bot decided on.
 
 **Architecture and roadmap:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
