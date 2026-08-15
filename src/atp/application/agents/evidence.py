@@ -11,13 +11,33 @@ assessment should be visible in the audit trail, not a workflow failure.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import structlog
 
 from atp.domain.models.explainability import Evidence
 
 log = structlog.get_logger()
+
+
+def external_evidence_sources(context: Mapping[str, Any] | None) -> set[str]:
+    """Citable ``bot:`` source names for caller-supplied context.
+
+    Agents are told to cite anything drawn from ``external_context`` as
+    ``bot:<field>``. Without registering those names here every such citation
+    would be reported as fabricated, and the warning would stop meaning
+    anything. Nested keys are exposed both bare and dotted, since a model may
+    reasonably cite either ``bot:trend_gate`` or ``bot:trend_gate.bias_direction``.
+    """
+    if not context:
+        return set()
+    sources: set[str] = set()
+    for key, value in context.items():
+        sources.add(f"bot:{key}")
+        if isinstance(value, Mapping):
+            sources.update(f"bot:{key}.{nested}" for nested in value)
+    return sources
 
 
 def warn_on_unknown_sources(

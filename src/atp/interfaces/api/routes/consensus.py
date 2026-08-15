@@ -15,14 +15,16 @@ translate would be this platform's problem leaking into the caller's.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from atp.application.orchestration import ReachConsensus
+from atp.application.request_scope import supplied_inputs
 from atp.domain.models.analysis import SignalDirection
-from atp.domain.models.market import BarInterval
+from atp.domain.models.market import Bar, BarInterval, PriceHistory
 from atp.domain.models.signals import BotSignal
 from atp.domain.models.trading import RiskDecision
 from atp.domain.models.voting import BotStatus, ConsensusDecision
@@ -88,6 +90,55 @@ class SignalRequest(BaseModel):
         )
 
 
+class BarInput(BaseModel):
+    """One OHLCV candle supplied by the caller.
+
+    Kept separate from the domain ``Bar`` so a malformed candle fails as a 422
+    on the request rather than as an exception mid-analysis. Timestamps must
+    carry a zone: a naive one is ambiguous, and a bot on a broker's server time
+    is exactly the caller most likely to send one.
+    """
+
+    timestamp: datetime
+    open: float = Field(gt=0)
+    high: float = Field(gt=0)
+    low: float = Field(gt=0)
+    close: float = Field(gt=0)
+    volume: float = Field(default=0.0, ge=0)
+
+    @field_validator("timestamp")
+    @classmethod
+    def _require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            msg = "bar timestamps must include a timezone offset"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _check_ohlc_consistency(self) -> BarInput:
+        # Mirrors the domain Bar's own check, deliberately duplicated so the
+        # rejection happens here as a 422 naming the bad candle. Without it the
+        # identical failure surfaces later, out of the request's validation
+        # context, and reaches the caller as a 500.
+        if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):
+            msg = (
+                f"inconsistent OHLC bar at {self.timestamp.isoformat()}: "
+                f"open={self.open} high={self.high} low={self.low} close={self.close}"
+            )
+            raise ValueError(msg)
+        return self
+
+    def to_bar(self) -> Bar:
+        return Bar(
+            timestamp=self.timestamp,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+        )
+
+
 class ConsensusRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=12, examples=["XAUUSD"])
     intervals: list[BarInterval] = Field(
@@ -112,6 +163,34 @@ class ConsensusRequest(BaseModel):
         gt=0,
         description="Used to size the proposal; without it the risk gate rejects for safety",
     )
+    bars: dict[BarInterval, list[BarInput]] = Field(
+        default_factory=dict,
+        description="Candles to analyse, per timeframe, supplied by the caller instead of "
+        "fetched here. A bot that has already pulled these from its broker should send "
+        "them: they are the same feed it decided on, at the moment it decided, and for "
+        "spot metals they avoid this platform's fallback to the front-month future "
+        "(XAUUSD -> GC=F). Timeframes carrying fewer than 60 usable bars are dropped.",
+    )
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description="The caller's own reading of the setup - indicator values, "
+        "higher-timeframe gate, levels, execution conditions. Reaches the agents as "
+        "supplementary evidence they may weigh but must not defer to. Omit any intended "
+        "direction: an agent that is told the answer cannot independently check it.",
+    )
+
+    def price_histories(self) -> dict[tuple[str, BarInterval], PriceHistory]:
+        """Supplied bars as domain histories, keyed for the request scope."""
+        symbol = self.symbol.strip().upper()
+        return {
+            (symbol, interval): PriceHistory(
+                symbol=symbol,
+                interval=interval,
+                bars=tuple(row.to_bar() for row in rows),
+            )
+            for interval, rows in self.bars.items()
+            if rows
+        }
 
 
 class ConsensusResponse(BaseModel):
@@ -163,14 +242,18 @@ async def reach_consensus(request: ConsensusRequest, http_request: Request) -> C
     Never executes. A caller that wants the trade sends the proposal to
     ``POST /trade``, which is a different scope on purpose.
     """
-    result = await _consensus(http_request).execute(
-        request.symbol,
-        request.intervals,
-        agents=request.agents or None,
-        signal=request.signal.to_signal() if request.signal else None,
-        stop_loss=request.stop_loss,
-        expected_bot=request.expected_bot,
-    )
+    # Caller-supplied candles and setup context are visible to the loaders and
+    # agents for the duration of this call only, then reset — so one request
+    # can never analyse another's bars.
+    with supplied_inputs(bars=request.price_histories(), context=request.context):
+        result = await _consensus(http_request).execute(
+            request.symbol,
+            request.intervals,
+            agents=request.agents or None,
+            signal=request.signal.to_signal() if request.signal else None,
+            stop_loss=request.stop_loss,
+            expected_bot=request.expected_bot,
+        )
     decision = result.decision
     return ConsensusResponse(
         decision=decision,

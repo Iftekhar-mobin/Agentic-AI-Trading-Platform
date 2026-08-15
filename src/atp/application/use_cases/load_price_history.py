@@ -3,6 +3,11 @@
 Shared by analysis and backtesting: reads from the repository when possible,
 and falls back to the market data provider when storage is unreachable or has
 fewer bars than the caller needs.
+
+Ahead of both sits a third source: bars supplied with the request itself (see
+``application.request_scope``). A caller that already holds the candles — a
+trading bot asking whether the agents agree with a decision it just made on
+them — should be analysed on those exact candles, not on a re-fetch.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 
+from atp.application.request_scope import supplied_history
 from atp.application.use_cases.sync_market_data import DEFAULT_LOOKBACK
 from atp.domain.errors import RepositoryUnavailableError
 from atp.domain.models.market import BarInterval, PriceHistory
@@ -42,6 +48,22 @@ class LoadPriceHistory:
         lookback: timedelta | None = None,
     ) -> PriceHistory:
         symbol = symbol.strip().upper()
+
+        # Supplied bars win outright, and are checked *before* the repository
+        # rather than after it. This use case is storage-first: were the order
+        # reversed, a symbol already stored with enough bars would return those
+        # and the caller's candles would be silently ignored. The failure would
+        # look like the agents simply disagreeing, with nothing anywhere to
+        # indicate they had read entirely different data.
+        supplied = supplied_history(symbol, interval)
+        if supplied is not None:
+            log.info(
+                "history.using_supplied_bars",
+                symbol=symbol,
+                interval=interval.value,
+                bars=len(supplied),
+            )
+            return supplied
 
         history = PriceHistory(symbol=symbol, interval=interval)
         try:
