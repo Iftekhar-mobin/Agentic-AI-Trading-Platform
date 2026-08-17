@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import importlib.util
 import signal
 import subprocess
 import sys
@@ -32,6 +33,12 @@ from urllib.parse import urlparse
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+
+SERVER_MODULES = ("uvicorn", "atp")
+"""What the interpreter running the server has to be able to import."""
+
+VENV_INTERPRETERS = (Path("Scripts", "python.exe"), Path("bin", "python"))
+"""Where a Python lives inside a virtualenv, on Windows and everywhere else."""
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1"})
 """Hosts we could plausibly start a server on. Anything else belongs to someone
@@ -69,6 +76,18 @@ def parse_target(base_url: str) -> Target:
     return Target(host=(host or "").strip() or DEFAULT_HOST, port=port or DEFAULT_PORT)
 
 
+def _importable(module: str) -> bool:
+    """Whether the running interpreter could import *module*, without doing so.
+
+    A broken or half-installed distribution makes ``find_spec`` raise rather
+    than answer; either way the honest answer here is "no".
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 class ApiServer:
     """A supervised ``uvicorn`` child process.
 
@@ -104,15 +123,33 @@ class ApiServer:
         """
         return self._process.poll() if self._process else None
 
-    def command(self, target: Target) -> list[str]:
-        """The command line, built from the interpreter running the console.
+    def interpreter(self) -> str:
+        """The Python that will run the server.
 
-        ``sys.executable -m uvicorn`` rather than the ``atp`` console script:
-        both live in the same environment, but only one of them is guaranteed to
-        be on PATH when Streamlit was launched from somewhere unexpected.
+        The console is routinely launched with whatever Streamlit is on the
+        PATH, which on a machine with a system Python is not the project's
+        environment at all — and that one has neither ``uvicorn`` nor ``atp``,
+        so the button used to produce "No module named uvicorn" in the log and
+        nothing else. When the current interpreter cannot serve, fall back to
+        the project's own virtualenv, which by definition can.
+        """
+        if all(_importable(module) for module in SERVER_MODULES):
+            return sys.executable
+        for relative in VENV_INTERPRETERS:
+            candidate = self._root / ".venv" / relative
+            if candidate.exists():
+                return str(candidate)
+        return sys.executable  # Nothing better to offer; the log will say so.
+
+    def command(self, target: Target) -> list[str]:
+        """The command line, built from an interpreter that can serve.
+
+        ``python -m uvicorn`` rather than the ``atp`` console script: both live
+        in the same environment, but only one of them is guaranteed to be on
+        PATH when Streamlit was launched from somewhere unexpected.
         """
         return [
-            sys.executable,
+            self.interpreter(),
             "-m",
             "uvicorn",
             "atp.interfaces.api:create_app",

@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ui" / "streamlit_app"))
 
-from server import DEFAULT_PORT, ApiServer, Target, parse_target
+from server import DEFAULT_PORT, VENV_INTERPRETERS, ApiServer, Target, parse_target
 
 
 @pytest.mark.parametrize(
@@ -46,9 +46,31 @@ def test_the_command_uses_the_interpreter_running_the_console(tmp_path: Path) ->
     server = ApiServer(tmp_path, tmp_path / "api.log")
     command = server.command(Target(host="127.0.0.1", port=9100))
 
+    # The tests run in the project environment, so it can serve.
     assert command[:3] == [sys.executable, "-m", "uvicorn"]
     assert "--factory" in command
     assert command[-4:] == ["--host", "127.0.0.1", "--port", "9100"]
+
+
+def test_an_interpreter_that_cannot_serve_falls_back_to_the_project_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streamlit off the system PATH has neither uvicorn nor atp; the venv has both."""
+    venv_python = tmp_path / ".venv" / VENV_INTERPRETERS[0]
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+    monkeypatch.setattr("server._importable", lambda module: False)
+
+    assert ApiServer(tmp_path, tmp_path / "api.log").interpreter() == str(venv_python)
+
+
+def test_without_a_project_venv_the_console_interpreter_is_still_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing better to offer, and the server log explains the failure."""
+    monkeypatch.setattr("server._importable", lambda module: False)
+
+    assert ApiServer(tmp_path, tmp_path / "api.log").interpreter() == sys.executable
 
 
 def test_nothing_is_managed_before_a_start(tmp_path: Path) -> None:
