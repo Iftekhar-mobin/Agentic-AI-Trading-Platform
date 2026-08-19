@@ -24,9 +24,10 @@ from pydantic import BaseModel, Field
 
 from atp.application.orchestration import ScreenOpportunities
 from atp.application.orchestration.consensus import ConsensusResult
+from atp.domain.llm_trace import llm_trace
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.fundamentals import FundamentalReport
-from atp.domain.models.llm import ActiveModel
+from atp.domain.models.llm import ActiveModel, LLMCall
 from atp.domain.models.market import BarInterval
 from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
@@ -140,6 +141,13 @@ class ScreenResponse(BaseModel):
     )
     requested: list[str]
     active_model: ActiveModel | None = None
+    llm_calls: list[LLMCall] = Field(
+        default_factory=list,
+        description=(
+            "Every language-model round-trip the screen made - symbols x agents, "
+            "plus the one comparative ranking call"
+        ),
+    )
     duration_ms: float
 
 
@@ -185,14 +193,15 @@ async def screen(request: ScreenRequest, http_request: Request) -> ScreenRespons
     A screen where every symbol failed is a 502: there is nothing to rank, and
     an empty leaderboard would read as "no opportunities" rather than "no data".
     """
-    result = await _screener(http_request).execute(
-        request.symbols,
-        request.intervals,
-        agents=request.agents or None,
-        top_n=request.top_n,
-        stop_loss=request.stop_loss,
-        expected_bot=request.expected_bot,
-    )
+    with llm_trace() as llm_calls:
+        result = await _screener(http_request).execute(
+            request.symbols,
+            request.intervals,
+            agents=request.agents or None,
+            top_n=request.top_n,
+            stop_loss=request.stop_loss,
+            expected_bot=request.expected_bot,
+        )
 
     if not result.outcomes:
         raise HTTPException(
@@ -213,6 +222,7 @@ async def screen(request: ScreenRequest, http_request: Request) -> ScreenRespons
         failures=[failure.model_dump() for failure in result.failures],
         requested=result.requested,
         active_model=http_request.app.state.container.llm_router.active,
+        llm_calls=llm_calls,
         duration_ms=result.duration_ms,
     )
 

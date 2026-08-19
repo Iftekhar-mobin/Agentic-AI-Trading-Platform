@@ -76,6 +76,15 @@ PROVIDER_HELP = {
     "anthropic": "No models configured.",
 }
 
+# Vendor names as a person would say them, not as the API spells them. A
+# comment rather than an attribute docstring: Streamlit's "magic" renders every
+# bare expression at module level, and a docstring is one.
+PROVIDER_LABEL = {
+    "anthropic": "Anthropic",
+    "openrouter": "OpenRouter",
+    "ollama": "Ollama (local)",
+}
+
 st.set_page_config(page_title="ATP Console", page_icon="📈", layout="wide")
 
 
@@ -84,6 +93,48 @@ def client() -> AtpClient:
         st.session_state.get("base_url", DEFAULT_BASE_URL),
         st.session_state.get("api_key", ""),
     )
+
+
+def model_line(provider: str | None, model: str | None) -> str:
+    """Vendor and exact model id, in one line, spelled the same everywhere.
+
+    Every place the console attributes reasoning goes through here. The model
+    id is never shortened: `nemotron-3-super-120b-a12b:free` and its paid twin
+    differ by a suffix, and a console that hides the suffix is the reason
+    someone spends an afternoon wondering why quality dropped.
+    """
+    label = PROVIDER_LABEL.get(provider or "", provider or "unknown vendor")
+    return f"🧠 **{label}** · `{model or 'no model'}`"
+
+
+def render_model_badge(provider: str | None, model: str | None, *, suffix: str = "") -> None:
+    st.caption(model_line(provider, model) + suffix)
+
+
+def llm_attribution() -> dict[str, dict[str, Any]]:
+    """Agent name -> the LLM call it made, for the run currently on screen.
+
+    Built from the trace the API returns rather than from the active model, so
+    a report rendered after someone switched models is still credited to the
+    backend that actually wrote it.
+    """
+    calls = st.session_state.get("llm_calls") or []
+    return {call["agent"]: call for call in calls if call.get("agent")}
+
+
+def render_agent_model(agent: str | None) -> None:
+    """Say which model produced the report being read, right where it is read."""
+    if not agent:
+        return
+    call = llm_attribution().get(agent)
+    if call is None:
+        # No trace for this agent: an older server, or a report served from a
+        # path that made no LLM call. Claiming the active model here would be a
+        # guess, so say nothing rather than something possibly untrue.
+        return
+    seconds = f" · {call.get('duration_ms', 0) / 1000:.1f}s"
+    failed = " · ❌ the call failed" if call.get("status") == "failed" else ""
+    render_model_badge(call.get("provider"), call.get("model"), suffix=seconds + failed)
 
 
 def show_error(exc: ApiError) -> None:
@@ -139,11 +190,16 @@ def render_assessment(
     key: str = "assessment",
     *,
     nested: bool = False,
+    agent: str | None = None,
 ) -> None:
     assessment = report[key]
     direction = assessment.get("direction", "neutral")
     label = f"{DIRECTION_ICON.get(direction, '⚪')} {title} — {direction}"
     with section(label, nested=nested, expanded=True):
+        # Whose judgement this is, before the judgement itself: the same
+        # reasoning from a 120B free model and from Opus deserves different
+        # weight, and the reader can only apply that if they are told which.
+        render_agent_model(agent)
         confidence_bar(title, assessment["confidence"])
         render_explanation(assessment)
 
@@ -169,6 +225,57 @@ def record_processing(api: AtpClient, result: dict[str, Any] | None = None) -> N
         "exchanges": list(api.exchanges),
         "result": result,
     }
+    # Kept beside it so every report renderer can name the model that wrote it
+    # without being handed the whole response.
+    st.session_state["llm_calls"] = (result or {}).get("llm_calls") or []
+
+
+def render_llm_calls(calls: list[dict[str, Any]]) -> None:
+    """Every language-model round-trip the run made, with vendor and model.
+
+    The Model metric above says what is configured; this says what answered.
+    They are normally the same, and the times they are not - a model switched
+    while a screen was running, a provider that failed over - are precisely the
+    runs someone comes to this page to understand.
+    """
+    st.subheader("LLM calls")
+    if not calls:
+        st.caption(
+            "No language-model calls recorded for this run. Either nothing "
+            "reached an agent, or the server predates per-call reporting."
+        )
+        return
+
+    vendors = sorted({model_line(call.get("provider"), call.get("model")) for call in calls})
+    for vendor in vendors:
+        st.markdown(vendor)
+    if len(vendors) > 1:
+        st.warning(
+            "More than one model served this run - the reports below were not "
+            "all written by the same backend."
+        )
+
+    st.dataframe(
+        [
+            {
+                "": STATUS_ICON.get(call.get("status", "ok"), "•"),
+                "agent": call.get("agent") or "—",
+                "vendor": PROVIDER_LABEL.get(call.get("provider", ""), call.get("provider", "—")),
+                "model": call.get("model", "—"),
+                "schema": call.get("response_model", ""),
+                "seconds": round(call.get("duration_ms", 0) / 1000, 2),
+                "detail": call.get("detail", ""),
+            }
+            for call in calls
+        ],
+        **FILL_WIDTH,
+        hide_index=True,
+    )
+    total = sum(call.get("duration_ms", 0) for call in calls)
+    st.caption(
+        f"{len(calls)} calls, {total / 1000:.1f}s of model time in total. The "
+        "analysis agents run concurrently, so this exceeds the wall clock."
+    )
 
 
 def render_processing() -> None:
@@ -190,14 +297,17 @@ def render_processing() -> None:
 
     # --- What the run cost -------------------------------------------------
     model = result.get("active_model") or {}
+    calls: list[dict[str, Any]] = result.get("llm_calls") or []
     failed = [step for step in steps if step["status"] == "failed"]
     columns = st.columns(4)
     columns[0].metric("Total time", f"{result.get('duration_ms', 0) / 1000:.1f}s")
     columns[1].metric("Agents run", len(steps))
     columns[2].metric("Failed", len(failed), delta=None if not failed else f"-{len(failed)}")
-    columns[3].metric("Model", model.get("model", "—").split("/")[-1] or "—")
+    columns[3].metric("LLM calls", len(calls))
     if model:
-        st.caption(f"Reasoning produced by **{model.get('provider')} / {model.get('model')}**")
+        st.info(model_line(model.get("provider"), model.get("model")) + " produced this reasoning")
+
+    render_llm_calls(calls)
 
     # --- Which agent did what ---------------------------------------------
     if steps:
@@ -494,8 +604,16 @@ def page_models() -> None:
 
     active = current["active"]
     switching = current["switching_enabled"]
+    st.session_state["active_model"] = active
+
+    # The banner, not just two metrics: this is the page where the answer is
+    # changed, so it is the page that has to be unambiguous about what the
+    # answer currently is.
+    st.success(model_line(active["provider"], active["model"]) + " — in use by every agent")
+    if switched := st.session_state.pop("model_switched", None):
+        st.toast(f"Now using {switched}", icon="✅")
     columns = st.columns(2)
-    columns[0].metric("Active provider", active["provider"])
+    columns[0].metric("Active provider", PROVIDER_LABEL.get(active["provider"], active["provider"]))
     columns[1].metric("Active model", active["model"])
     if not switching:
         st.warning(
@@ -504,7 +622,13 @@ def page_models() -> None:
         )
 
     providers = current["providers"]
-    provider = st.selectbox("Provider", providers, index=providers.index(active["provider"]))
+    # Defaults to the active provider, but remembers where you browsed to:
+    # comparing Ollama's catalog should not reset every time the page reruns.
+    browsing = st.session_state.get("models_provider", active["provider"])
+    if browsing not in providers:
+        browsing = active["provider"]
+    provider = st.selectbox("Provider", providers, index=providers.index(browsing))
+    st.session_state["models_provider"] = provider
     free_only = st.checkbox("Free models only", value=provider == "openrouter")
 
     try:
@@ -518,9 +642,16 @@ def page_models() -> None:
     if not models:
         st.info(PROVIDER_HELP.get(provider, "No models returned by this provider."))
     else:
+
+        def is_active(model: dict[str, Any]) -> bool:
+            return provider == active["provider"] and model["id"] == active["model"]
+
         st.dataframe(
             [
                 {
+                    # The catalog can run to hundreds of rows; the one in use
+                    # should be findable without reading the id of each.
+                    "": "✅" if is_active(model) else "",
                     "model": model["id"],
                     "name": model["name"],
                     "free": model["free"],
@@ -533,7 +664,18 @@ def page_models() -> None:
             hide_index=True,
         )
 
-        choice = st.selectbox("Select a model", [model["id"] for model in models])
+        ids = [model["id"] for model in models]
+        # Preselect what is running, so the button under it never offers to
+        # switch to something the reader did not choose.
+        default = active["model"] if active["model"] in ids else ids[0]
+        choice = st.selectbox("Select a model", ids, index=ids.index(default))
+        if provider == active["provider"] and choice == active["model"]:
+            st.caption("✅ This is the model the agents are using now.")
+        else:
+            st.caption(
+                f"Selecting this replaces {model_line(active['provider'], active['model'])} "
+                "for every agent, from the next call onwards."
+            )
         selected = next(model for model in models if model["id"] == choice)
         needs_download = selected["installed"] is False
 
@@ -543,10 +685,17 @@ def page_models() -> None:
         ):
             try:
                 result = api.select_model(provider, choice)
-                st.success(f"Agents now use {result['provider']} / {result['model']}")
-                st.rerun()
             except ApiError as exc:
                 show_error(exc)
+            else:
+                # Survives the rerun that follows: the banner and the sidebar
+                # both re-read the server, and this says what just changed.
+                st.session_state["active_model"] = result
+                st.session_state["model_switched"] = (
+                    f"{PROVIDER_LABEL.get(result['provider'], result['provider'])} / "
+                    f"{result['model']}"
+                )
+                st.rerun()
         if needs_download:
             actions[0].caption("Download it first.")
 
@@ -647,7 +796,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
     is already an expander above us — see ``section``.
     """
     if technical := result.get("technical_report"):
-        render_assessment("Technical", technical, nested=nested)
+        render_assessment("Technical", technical, nested=nested, agent="technical_analysis")
         st.info(f"**Timeframe alignment.** {technical['assessment']['timeframe_alignment']}")
         render_timeframe_directions(technical["timeframes"])
         for frame in technical["timeframes"]:
@@ -666,7 +815,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
                 )
 
     if patterns := result.get("chart_pattern_report"):
-        render_assessment("Chart patterns", patterns, nested=nested)
+        render_assessment("Chart patterns", patterns, nested=nested, agent="chart_pattern")
         st.info(f"**Timeframe alignment.** {patterns['assessment']['timeframe_alignment']}")
         render_timeframe_directions(patterns["timeframes"])
         for frame in patterns["timeframes"]:
@@ -708,7 +857,12 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
                     )
 
     if research := result.get("market_research_report"):
-        render_assessment(f"Market research vs {research['benchmark']}", research, nested=nested)
+        render_assessment(
+            f"Market research vs {research['benchmark']}",
+            research,
+            nested=nested,
+            agent="market_research",
+        )
         with section("Relative measurements", nested=nested):
             st.dataframe(
                 [
@@ -724,7 +878,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
             )
 
     if fundamental := result.get("fundamental_report"):
-        render_assessment("Fundamentals", fundamental, nested=nested)
+        render_assessment("Fundamentals", fundamental, nested=nested, agent="fundamental_analysis")
         with section("Metric readings", nested=nested):
             st.dataframe(
                 [
@@ -741,7 +895,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
             )
 
     if news := result.get("news_report"):
-        render_assessment("News", news, nested=nested)
+        render_assessment("News", news, nested=nested, agent="news_analysis")
         st.markdown("**Themes:** " + ", ".join(news["assessment"]["key_themes"]))
         with section(f"{len(news['articles'])} articles", nested=nested):
             for article in news["articles"]:
@@ -751,7 +905,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
                 )
 
     if sentiment := result.get("sentiment_report"):
-        render_assessment("Sentiment", sentiment, nested=nested)
+        render_assessment("Sentiment", sentiment, nested=nested, agent="sentiment_analysis")
         summary = sentiment["summary"]
         columns = st.columns(4)
         columns[0].metric("Weighted polarity", f"{summary['weighted_polarity']:+.2f}")
@@ -760,7 +914,7 @@ def render_reports(result: dict[str, Any], *, nested: bool = False) -> None:
         columns[3].metric("Classifier", sentiment["model_name"])
 
     if learning := result.get("learning_report"):
-        render_assessment("Learning", learning, "entry", nested=nested)
+        render_assessment("Learning", learning, "entry", nested=nested, agent="continuous_learning")
         if regime := learning.get("regime"):
             st.info(f"Market regime: **{regime['trend']} / {regime['volatility']}**")
         st.markdown("**Lessons**")
@@ -1345,6 +1499,33 @@ def server_controls(*, reachable: bool) -> None:
             st.code(tail, language="text")
 
 
+def render_active_model(active: dict[str, Any] | None) -> None:
+    """The model every page is about to use, kept on screen at all times.
+
+    Read from `/health` rather than `/models`, which lists a provider's whole
+    catalog over the network. This is the answer to "which model am I running?"
+    and it should not cost a round-trip to openrouter.ai to get it.
+
+    It also closes the loop on the Models page: after switching, the sidebar
+    shows the new model on every page and after every rerun, so a selection
+    made once stays visible rather than living only in the toast that
+    announced it.
+    """
+    if not active:
+        st.sidebar.caption("🧠 No model reported by this server.")
+        return
+    provider, model = active.get("provider"), active.get("model")
+    previous = st.session_state.get("active_model")
+    st.session_state["active_model"] = active
+
+    with st.sidebar.container(border=True):
+        st.markdown("**Agents are using**")
+        st.markdown(model_line(provider, model))
+        if previous and previous != active:
+            label = PROVIDER_LABEL.get(previous.get("provider", ""), previous.get("provider"))
+            st.caption(f"Switched from `{previous.get('model')}` ({label}).")
+
+
 def sidebar() -> None:
     """Connection, server control, and nothing else — navigation is up top."""
     st.sidebar.title("📈 ATP Console")
@@ -1359,6 +1540,7 @@ def sidebar() -> None:
     try:
         health = api.health()
         st.sidebar.success(f"API {health['version']} · {health['status']}")
+        render_active_model(health.get("active_model"))
     except ApiError as exc:
         reachable = False
         st.sidebar.error(f"API unreachable\n\n{exc}")

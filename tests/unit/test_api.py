@@ -31,8 +31,12 @@ from atp.application.use_cases import (
 )
 from atp.composition import Container
 from atp.domain.errors import InsufficientDataError, InsufficientHistoryError
+from atp.domain.models.llm import ActiveModel, LLMProvider
 from atp.domain.models.market import BarInterval
+from atp.domain.models.news import NewsReport
+from atp.domain.ports.llm import LLMClient
 from atp.infrastructure.config import Settings
+from atp.infrastructure.llm import LLMRouter
 from atp.interfaces.api import create_app
 
 
@@ -209,3 +213,84 @@ def test_multi_timeframe_request_is_sorted_highest_first(client: TestClient) -> 
     response = client.post("/analysis", json={"symbol": "AAPL", "intervals": ["1h", "1d", "4h"]})
     assert response.status_code == 200
     assert response.json()["intervals"] == ["1d", "4h", "1h"]
+
+
+# --- Which model answered ---------------------------------------------------
+
+
+class OneCallUseCase:
+    """A use case whose only job is to make one real call through the router."""
+
+    def __init__(self, router: LLMRouter) -> None:
+        self._router = router
+
+    async def execute(
+        self,
+        symbol: str,
+        intervals: Sequence[BarInterval] | BarInterval = BarInterval.DAY_1,
+    ) -> BaseModel:
+        await self._router.generate_structured(NewsReport, system="s", prompt="p")
+        return make_news_report(symbol)
+
+
+class StubLLMClient:
+    def __init__(self, symbol: str = "AAPL") -> None:
+        self._symbol = symbol
+
+    async def generate_structured(
+        self, response_model: type[BaseModel], *, system: str, prompt: str
+    ) -> BaseModel:
+        return make_news_report(self._symbol)
+
+
+def make_attributing_client() -> TestClient:
+    """An app wired so exactly one agent makes exactly one LLM call."""
+    router = LLMRouter(
+        lambda active: cast(LLMClient, StubLLMClient()),
+        ActiveModel(provider=LLMProvider.OPENROUTER, model="vendor/model:free"),
+    )
+    orchestrator = TradingOrchestrator(
+        cast(AnalyzeTicker, StubUseCase(make_technical_report)),
+        cast(AnalyzeChartPatterns, StubUseCase(make_chart_pattern_report)),
+        cast(AnalyzeMarketResearch, StubUseCase(make_market_research_report)),
+        cast(AnalyzeFundamentals, StubUseCase(make_fundamental_report)),
+        cast(AnalyzeNews, OneCallUseCase(router)),
+        cast(AnalyzeSentiment, StubUseCase(make_sentiment_report)),
+        cast(LearnFromContext, StubLearning()),
+    )
+    container = dataclasses.replace(
+        Container.build(Settings(_env_file=None)),
+        orchestrator=orchestrator,
+        llm_router=router,
+    )
+    return TestClient(create_app(container))
+
+
+def test_analysis_reports_the_model_behind_each_call() -> None:
+    """The report says which vendor answered, not merely which is configured."""
+    with make_attributing_client() as client:
+        body = client.post("/analysis", json={"symbol": "AAPL"}).json()
+
+    assert body["active_model"] == {"provider": "openrouter", "model": "vendor/model:free"}
+    calls = body["llm_calls"]
+    assert len(calls) == 1
+    assert calls[0]["provider"] == "openrouter"
+    assert calls[0]["model"] == "vendor/model:free"
+    assert calls[0]["agent"] == "news_analysis"
+    assert calls[0]["status"] == "ok"
+
+
+def test_one_request_never_reports_another_s_calls() -> None:
+    """The trace is per request; a second run must not inherit the first."""
+    with make_attributing_client() as client:
+        client.post("/analysis", json={"symbol": "AAPL"})
+        body = client.post("/analysis", json={"symbol": "MSFT"}).json()
+
+    assert len(body["llm_calls"]) == 1
+
+
+def test_health_names_the_active_model(client: TestClient) -> None:
+    """The console keeps it on screen, so it must not cost a catalog listing."""
+    active = client.get("/health").json()["active_model"]
+    assert active["provider"]
+    assert active["model"]

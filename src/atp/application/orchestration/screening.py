@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from atp.application.agents.opportunity_ranking import OpportunityRankingAgent
 from atp.application.orchestration.consensus import AGENT_ARTIFACTS, ConsensusResult, ReachConsensus
 from atp.application.orchestration.state import TradingState
+from atp.domain.llm_trace import attributed_to
 from atp.domain.models.market import BarInterval
 from atp.domain.models.ranking import Candidate, OpportunityRanking
 from atp.domain.models.trading import RiskDecision
@@ -140,7 +141,10 @@ class ScreenOpportunities:
             candidates.append(_candidate(symbol, outcome, expected_voters=expected_voters))
 
         limit = top_n if top_n is not None else self._default_top_n
-        ranked = await self._ranker.rank(candidates, limit=limit)
+        # The comparative call is the ranking agent's, not any one symbol's;
+        # naming it keeps it distinguishable in the run's LLM trace.
+        with attributed_to("opportunity_ranking"):
+            ranked = await self._ranker.rank(candidates, limit=limit)
 
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         log.info(

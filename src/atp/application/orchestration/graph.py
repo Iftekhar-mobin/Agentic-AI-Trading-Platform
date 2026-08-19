@@ -54,6 +54,7 @@ from atp.application.use_cases.analyze_sentiment import AnalyzeSentiment
 from atp.application.use_cases.analyze_ticker import AnalyzeTicker
 from atp.application.use_cases.learn_from_context import LearnFromContext
 from atp.domain.errors import DomainError
+from atp.domain.llm_trace import attributed_to
 from atp.domain.models.market import BarInterval, sort_timeframes
 
 log = structlog.get_logger()
@@ -299,7 +300,11 @@ class TradingOrchestrator:
             )
 
         try:
-            report = await run()
+            # Naming the agent here, once, is what lets every LLM call it makes
+            # be reported against it - the agents themselves never learn that
+            # anything is being recorded.
+            with attributed_to(agent):
+                report = await run()
         except DomainError as exc:
             log.warning("agent.failed", agent=agent, symbol=state.symbol, error=str(exc))
             return {

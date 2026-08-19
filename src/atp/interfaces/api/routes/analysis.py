@@ -17,9 +17,10 @@ from atp.application.orchestration import (
     TradingOrchestrator,
     UnknownAgentError,
 )
+from atp.domain.llm_trace import llm_trace
 from atp.domain.models.analysis import TechnicalReport
 from atp.domain.models.fundamentals import FundamentalReport
-from atp.domain.models.llm import ActiveModel
+from atp.domain.models.llm import ActiveModel, LLMCall
 from atp.domain.models.market import BarInterval
 from atp.domain.models.memory import LearningReport
 from atp.domain.models.news import NewsReport
@@ -71,6 +72,13 @@ class AnalysisResponse(BaseModel):
         default=None,
         description="The provider and model that produced this reasoning",
     )
+    llm_calls: list[LLMCall] = Field(
+        default_factory=list,
+        description=(
+            "Every language-model round-trip this run made, in call order: which "
+            "vendor and model answered, for which agent, and how long it took"
+        ),
+    )
     duration_ms: float = Field(default=0.0, description="Total wall-clock time for the run")
     technical_report: TechnicalReport | None = None
     chart_pattern_report: ChartPatternReport | None = None
@@ -89,10 +97,13 @@ def _orchestrator(request: Request) -> TradingOrchestrator:
 async def run_analysis(request: AnalysisRequest, http_request: Request) -> AnalysisResponse:
     orchestrator = _orchestrator(http_request)
     started = time.perf_counter()
-    try:
-        state = await orchestrator.run(request.symbol, request.intervals, agents=request.agents)
-    except UnknownAgentError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Records which vendor and model actually served each agent, rather than
+    # reporting the configured one and hoping it did not move mid-run.
+    with llm_trace() as llm_calls:
+        try:
+            state = await orchestrator.run(request.symbol, request.intervals, agents=request.agents)
+        except UnknownAgentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
 
     failures = [AgentFailureSchema(agent=f.agent, error=f.error) for f in state.failures]
@@ -114,6 +125,7 @@ async def run_analysis(request: AnalysisRequest, http_request: Request) -> Analy
         # Chronological, so the two phases read in the order they happened.
         steps=sorted(state.steps, key=lambda step: step.started_at),
         active_model=http_request.app.state.container.llm_router.active,
+        llm_calls=llm_calls,
         duration_ms=duration_ms,
         technical_report=state.technical_report,
         chart_pattern_report=state.chart_pattern_report,

@@ -8,7 +8,9 @@ list, compare on cost, and switch at runtime without redeploying.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +53,38 @@ class ActiveModel(BaseModel):
 
     provider: LLMProvider
     model: str = Field(min_length=1)
+
+    def __str__(self) -> str:
+        return f"{self.provider.value}:{self.model}"
+
+
+class LLMCall(BaseModel):
+    """One round-trip to a language model, recorded as it happened.
+
+    ``ActiveModel`` says which backend is *configured*; this says which one
+    actually answered, for a specific agent, at a specific moment. The two
+    diverge exactly when it matters most — a model switched mid-session, a
+    provider that fell over — so a reader who is told only the configured value
+    can be told something untrue about work already done.
+    """
+
+    model_config = ConfigDict(frozen=True, protected_namespaces=())
+
+    provider: LLMProvider
+    """The vendor that served the call."""
+
+    model: str = Field(min_length=1)
+    agent: str | None = Field(
+        default=None,
+        description="The agent whose work this call was, when it was made inside one",
+    )
+    response_model: str = Field(
+        min_length=1, description="Schema the model was required to fill in"
+    )
+    started_at: datetime
+    duration_ms: float = Field(ge=0)
+    status: Literal["ok", "failed"] = "ok"
+    detail: str = Field(default="", description="Why it failed; empty on success")
 
     def __str__(self) -> str:
         return f"{self.provider.value}:{self.model}"

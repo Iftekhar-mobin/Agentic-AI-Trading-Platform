@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel
 
 from atp.domain.errors import LLMGenerationError, ModelUnavailableError
+from atp.domain.llm_trace import attributed_to, llm_trace
 from atp.domain.models.llm import ActiveModel, LLMProvider
 from atp.infrastructure.config import LLMSettings
 from atp.infrastructure.llm import (
@@ -397,6 +398,89 @@ async def test_selecting_an_empty_model_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="model id is required"):
         await router.select(LLMProvider.OLLAMA, "  ")
+
+
+# --- Per-call attribution ---------------------------------------------------
+
+
+class FailingClient:
+    async def generate_structured(
+        self, response_model: type[Answer], *, system: str, prompt: str
+    ) -> Answer:
+        raise LLMGenerationError("rate limited")
+
+
+async def test_the_router_records_which_model_answered() -> None:
+    router = LLMRouter(
+        lambda active: RecordingClient(str(active)),  # type: ignore[arg-type,return-value]
+        ActiveModel(provider=LLMProvider.OPENROUTER, model="vendor/model:free"),
+    )
+
+    with llm_trace() as calls, attributed_to("news_analysis"):
+        await router.generate_structured(Answer, system="s", prompt="p")
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.provider is LLMProvider.OPENROUTER
+    assert call.model == "vendor/model:free"
+    assert call.agent == "news_analysis"
+    assert call.response_model == "Answer"
+    assert call.status == "ok"
+
+
+async def test_a_call_is_credited_to_the_model_that_served_it() -> None:
+    """A switch between calls must not rewrite who did the earlier work."""
+    router = LLMRouter(
+        lambda active: RecordingClient(str(active)),  # type: ignore[arg-type,return-value]
+        ActiveModel(provider=LLMProvider.ANTHROPIC, model="claude-opus-4-8"),
+    )
+
+    with llm_trace() as calls:
+        await router.generate_structured(Answer, system="s", prompt="p")
+        await router.select(LLMProvider.OLLAMA, "llama3.1:8b")
+        await router.generate_structured(Answer, system="s", prompt="p")
+
+    assert [(call.provider, call.model) for call in calls] == [
+        (LLMProvider.ANTHROPIC, "claude-opus-4-8"),
+        (LLMProvider.OLLAMA, "llama3.1:8b"),
+    ]
+
+
+async def test_a_failed_call_is_recorded_and_still_raises() -> None:
+    router = LLMRouter(
+        lambda active: FailingClient(),  # type: ignore[arg-type,return-value]
+        ActiveModel(provider=LLMProvider.OPENROUTER, model="vendor/model:free"),
+    )
+
+    with llm_trace() as calls, pytest.raises(LLMGenerationError):
+        await router.generate_structured(Answer, system="s", prompt="p")
+
+    assert calls[0].status == "failed"
+    assert "rate limited" in calls[0].detail
+
+
+async def test_recording_outside_a_trace_is_a_no_op() -> None:
+    """The CLI and the tests use the router too; neither has to opt out."""
+    router = LLMRouter(
+        lambda active: RecordingClient(str(active)),  # type: ignore[arg-type,return-value]
+        ActiveModel(provider=LLMProvider.ANTHROPIC, model="claude-opus-4-8"),
+    )
+    assert (await router.generate_structured(Answer, system="s", prompt="p")).score == 1.0
+
+
+async def test_one_trace_never_sees_another_request_s_calls() -> None:
+    router = LLMRouter(
+        lambda active: RecordingClient(str(active)),  # type: ignore[arg-type,return-value]
+        ActiveModel(provider=LLMProvider.ANTHROPIC, model="claude-opus-4-8"),
+    )
+
+    with llm_trace() as first:
+        await router.generate_structured(Answer, system="s", prompt="p")
+    with llm_trace() as second:
+        await router.generate_structured(Answer, system="s", prompt="p")
+
+    assert len(first) == 1
+    assert len(second) == 1
 
 
 # --- Settings ---------------------------------------------------------------

@@ -23,7 +23,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from atp.application.orchestration import ReachConsensus
 from atp.application.request_scope import supplied_inputs
+from atp.domain.llm_trace import llm_trace
 from atp.domain.models.analysis import SignalDirection
+from atp.domain.models.llm import ActiveModel, LLMCall
 from atp.domain.models.market import Bar, BarInterval, PriceHistory
 from atp.domain.models.signals import BotSignal
 from atp.domain.models.trading import RiskDecision
@@ -208,6 +210,14 @@ class ConsensusResponse(BaseModel):
     executable: bool = Field(
         description="Consensus wants a trade and the risk gate approved it; still needs a human",
     )
+    active_model: ActiveModel | None = Field(
+        default=None,
+        description="The provider and model the agent votes were reasoned with",
+    )
+    llm_calls: list[LLMCall] = Field(
+        default_factory=list,
+        description="Every language-model round-trip behind these votes, in call order",
+    )
 
 
 def _signals(request: Request) -> SignalRepository:
@@ -245,7 +255,10 @@ async def reach_consensus(request: ConsensusRequest, http_request: Request) -> C
     # Caller-supplied candles and setup context are visible to the loaders and
     # agents for the duration of this call only, then reset — so one request
     # can never analyse another's bars.
-    with supplied_inputs(bars=request.price_histories(), context=request.context):
+    with (
+        supplied_inputs(bars=request.price_histories(), context=request.context),
+        llm_trace() as llm_calls,
+    ):
         result = await _consensus(http_request).execute(
             request.symbol,
             request.intervals,
@@ -265,4 +278,6 @@ async def reach_consensus(request: ConsensusRequest, http_request: Request) -> C
         agreement=round(decision.agreement, 4),
         tally=decision.tally,
         executable=result.risk is not None and result.risk.verdict.value == "approved",
+        active_model=http_request.app.state.container.llm_router.active,
+        llm_calls=llm_calls,
     )
